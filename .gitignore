@@ -1,0 +1,13 @@
+__pycache__
+*.json
+*.png
+*.jpeg
+*.jpg
+*.tsv
+*.csv
+
+*.pt
+*.pth
+*.npy
+
+data
