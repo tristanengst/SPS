@@ -1,151 +1,56 @@
-from PIL import Image
-import torch as th
+import argparse
+import torch
+from dalle_pytorch import OpenAIDiscreteVAE, DALLE, VQGanVAE
 
-from glide_text2im.download import load_checkpoint
-from glide_text2im.model_creation import (
-    create_model_and_diffusion,
-    model_and_diffusion_defaults,
-    model_and_diffusion_defaults_upsampler
+vae = OpenAIDiscreteVAE()       # loads pretrained OpenAI VAE
+
+dalle = DALLE(
+    dim = 1024,
+    vae = vae,                  # automatically infer (1) image sequence length and (2) number of image tokens
+    num_text_tokens = 10000,    # vocab size for text
+    text_seq_len = 256,         # text sequence length
+    depth = 1,                  # should aim to be 64
+    heads = 16,                 # attention heads
+    dim_head = 64,              # attention head dimension
+    attn_dropout = 0.1,         # attention dropout
+    ff_dropout = 0.1            # feedforward dropout
 )
 
-has_cuda = th.cuda.is_available()
-device = th.device('cpu' if not has_cuda else 'cuda')
+text = torch.randint(0, 10000, (4, 256))
+images = torch.randn(4, 3, 256, 256)
 
-options = model_and_diffusion_defaults()
-options['use_fp16'] = has_cuda
-options['timestep_respacing'] = '100' # use 100 diffusion steps for fast sampling
-model, diffusion = create_model_and_diffusion(**options)
-model.eval()
-if has_cuda:
-    model.convert_to_fp16()
-model.to(device)
-model.load_state_dict(load_checkpoint('base', device))
-print('total base parameters', sum(x.numel() for x in model.parameters()))
+loss = dalle(text, images, return_loss = True)
+loss.backward()
 
-options_up = model_and_diffusion_defaults_upsampler()
-options_up['use_fp16'] = has_cuda
-options_up['timestep_respacing'] = 'fast27' # use 27 diffusion steps for very fast sampling
-model_up, diffusion_up = create_model_and_diffusion(**options_up)
-model_up.eval()
-if has_cuda:
-    model_up.convert_to_fp16()
-model_up.to(device)
-model_up.load_state_dict(load_checkpoint('upsample', device))
-print('total upsampler parameters', sum(x.numel() for x in model_up.parameters()))
+def one_epoch(model, optimizer, loader):
+    """
+    """
 
-def show_images(batch: th.Tensor):
-    """ Display a batch of images inline. """
-    scaled = ((batch + 1)*127.5).round().clamp(0,255).to(th.uint8).cpu()
-    reshaped = scaled.permute(2, 0, 3, 1).reshape([batch.shape[2], -1, 3])
-    im = Image.fromarray(reshaped.numpy())
-    im.show()
+if __name__ == "__main__":
+    P = argparse.ArgumentParser("")
+    P.add_argument("--data_dir", type=str, default=data_dir,
+        help="Directory for storing project data. Only override if nondefault")
+    P.add_argument("--data", default=["coco_captions_images"],
+        help="Path to folder containing training images and captions")
+    P.add_argument("--seed", type=int, default=0,
+        help="Random seed for dataset splitting")
 
+    P.add_argument("--bs", type=int, default=1,
+        help="Batch size")
+    P.add_argument("--lr", type=float, default=4.5e-4,
+        help="Learning rate")
+    P.add_argument("--vae", choices=["vqgan", "openai"], default="vqgan",
+        help="Pretrained VAE type")
+    P.add_argument("--options", nargs="+", default=[],
+        help="Options")
+    args = P.parse_args()
 
+    args.options = sorted([
 
+    ])
 
-# Sampling parameters
-prompt = "a dog eating a cake"
-batch_size = 1
-guidance_scale = 3.0
-
-# Tune this parameter to control the sharpness of 256x256 images.
-# A value of 1.0 is sharper, but sometimes results in grainy artifacts.
-upsample_temp = 0.997
-
-##############################
-# Sample from the base model #
-##############################
-
-# Create the text tokens to feed to the model.
-tokens = model.tokenizer.encode(prompt)
-tokens, mask = model.tokenizer.padded_tokens_and_mask(
-    tokens, options['text_ctx']
-)
-
-# Create the classifier-free guidance tokens (empty)
-full_batch_size = batch_size * 2
-uncond_tokens, uncond_mask = model.tokenizer.padded_tokens_and_mask(
-    [], options['text_ctx']
-)
-
-# Pack the tokens together into model kwargs.
-model_kwargs = dict(
-    tokens=th.tensor(
-        [tokens] * batch_size + [uncond_tokens] * batch_size, device=device
-    ),
-    mask=th.tensor(
-        [mask] * batch_size + [uncond_mask] * batch_size,
-        dtype=th.bool,
-        device=device,
-    ),
-)
-
-# Create a classifier-free guidance sampling function
-def model_fn(x_t, ts, **kwargs):
-    half = x_t[: len(x_t) // 2]
-    combined = th.cat([half, half], dim=0)
-    model_out = model(combined, ts, **kwargs)
-    eps, rest = model_out[:, :3], model_out[:, 3:]
-    cond_eps, uncond_eps = th.split(eps, len(eps) // 2, dim=0)
-    half_eps = uncond_eps + guidance_scale * (cond_eps - uncond_eps)
-    eps = th.cat([half_eps, half_eps], dim=0)
-    return th.cat([eps, rest], dim=1)
-
-# Sample from the base model.
-model.del_cache()
-samples = diffusion.p_sample_loop(
-    model_fn,
-    (full_batch_size, 3, options["image_size"], options["image_size"]),
-    device=device,
-    clip_denoised=True,
-    progress=True,
-    model_kwargs=model_kwargs,
-    cond_fn=None,
-)[:batch_size]
-model.del_cache()
-
-# Show the output
-show_images(samples)
-
-##############################
-# Upsample the 64x64 samples #
-##############################
-
-tokens = model_up.tokenizer.encode(prompt)
-tokens, mask = model_up.tokenizer.padded_tokens_and_mask(
-    tokens, options_up['text_ctx']
-)
-
-# Create the model conditioning dict.
-model_kwargs = dict(
-    # Low-res image to upsample.
-    low_res=((samples+1)*127.5).round()/127.5 - 1,
-
-    # Text tokens
-    tokens=th.tensor(
-        [tokens] * batch_size, device=device
-    ),
-    mask=th.tensor(
-        [mask] * batch_size,
-        dtype=th.bool,
-        device=device,
-    ),
-)
-
-# Sample from the base model.
-model_up.del_cache()
-up_shape = (batch_size, 3, options_up["image_size"], options_up["image_size"])
-up_samples = diffusion_up.ddim_sample_loop(
-    model_up,
-    up_shape,
-    noise=th.randn(up_shape, device=device) * upsample_temp,
-    device=device,
-    clip_denoised=True,
-    progress=True,
-    model_kwargs=model_kwargs,
-    cond_fn=None,
-)[:batch_size]
-model_up.del_cache()
-
-# Show the output
-show_images(up_samples)
+    set_seed(args.seed)
+    run_id = wandb.util.generate_id()
+    wandb.init(anonymous="allow", id=run_id, project="DALL-E Training",
+        mode="online" if args.wandb else "disabled", config=args,
+        name=save_dir.replace(f"{project_dir}/generators/", ""))

@@ -35,7 +35,8 @@ class MLP(nn.Module):
 
 class FeatBlock(nn.Module):
     """A block for feature extraction."""
-    def __init__(self, in_shape, out_shape)
+    def __init__(self, in_shape, out_shape):
+
 
 
 class SPSBlock(nn.Module):
