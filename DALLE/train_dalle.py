@@ -408,14 +408,12 @@ tqdm.write(f"Will print every {print_iter} iterations")
 for epoch in tqdm(range(resume_epoch, EPOCHS), desc="Epochs"):
 
     for i, (text, images) in tqdm(enumerate(dl), desc="Batches", leave=False, total=len(dl)):
-        if i % 10 == 0:
-            t = time.time()
 
         optimizer.zero_grad(set_to_none=True)
 
         with autocast():
             text, images = map(lambda t: t.to(device), (text, images))
-            loss = dalle(text, images, return_loss=True)
+            loss = dalle(text, images, return_loss=True).mean()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         clip_grad_norm_(dalle.parameters(), GRAD_CLIP_NORM)
@@ -444,11 +442,6 @@ for epoch in tqdm(range(resume_epoch, EPOCHS), desc="Epochs"):
 
             image=dalle.module.generate_images(text[:1], filter_thres=0.9)  # topk sampling at 0.9
             log["image"]=wandb.Image(image, caption=decoded_text)
-
-        if i % print_iter == 9:
-            sample_per_sec=BATCH_SIZE * print_iter / (time.time() - t)
-            log["sample_per_sec"]=sample_per_sec
-            tqdm.write(f"epoch {epoch:3} | iter {i:7} | sample_per_sec {sample_per_sec}")
 
         if i == 201 and args.flops_profiler:
             raise StopIteration("Profiler has finished running. Stopping training early.")
