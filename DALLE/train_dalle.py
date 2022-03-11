@@ -7,6 +7,7 @@ import shutil
 from tqdm import tqdm
 
 import torch
+import torch.nn as nn
 import wandb
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Adam
@@ -14,7 +15,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from dalle_pytorch import OpenAIDiscreteVAE, VQGanVAE, DiscreteVAE, DALLE
-from dalle_pytorch import distributed_utils
 from dalle_pytorch.loader import TextImageDataset
 from dalle_pytorch.tokenizer import tokenizer, HugTokenizer, ChineseTokenizer, YttmTokenizer
 
@@ -24,9 +24,13 @@ from torchvision import transforms as T
 from PIL import Image
 from io import BytesIO
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 parser=argparse.ArgumentParser()
 parser.add_argument("--wandb", choices=[0, 1], default=1, type=int,
     help="use wandb or not")
+parser.add_argument("--gpus", type=int, nargs="+", default=[0],
+    help="GPUS to use")
 group=parser.add_mutually_exclusive_group(required=False)
 group.add_argument("--vae_path", type=str,
     help="path to your trained discrete VAE")
@@ -62,7 +66,6 @@ parser.add_argument("--wandb_entity", default=None,
 parser.add_argument("--stable_softmax", dest="stable_softmax", action="store_true",
     help="Prevent values from becoming too large during softmax. Helps with stability in fp16 and Mixture of Quantization training.")
 
-parser=distributed_utils.wrap_arg_parser(parser)
 train_group=parser.add_argument_group("Training settings")
 
 train_group.add_argument("--flops_profiler", dest="flops_profiler", action="store_true",
@@ -177,41 +180,10 @@ SHARED_ATTN_IDS=tuple(args.shared_attn_ids.split(",")) if exists(args.shared_att
 SHARED_FF_IDS=tuple(args.shared_ff_ids.split(",")) if exists(args.shared_ff_ids) else None
 SHARE_INPUT_OUTPUT_EMB=args.share_input_output_emb
 
-DEEPSPEED_CP_AUX_FILENAME="auxiliary.pt"
-
 ################################################################################
 # Argument checking
 ################################################################################
-
-if not ENABLE_WEBDATASET:
-    # quit early if you used the wrong folder name
-    assert Path(args.image_text_folder).exists(), f"The path {args.image_text_folder} was not found."
-else:
-    # quit early if no tar files were found
-    if Path(args.image_text_folder).is_dir():
-        DATASET=[str(p) for p in Path(args.image_text_folder).glob("**/*") if ".tar" in str(p).lower()] # .name
-        assert len(DATASET) > 0, "The directory ({}) does not contain any WebDataset/.tar files.".format(args.image_text_folder)
-        tqdm.write("Found {} WebDataset .tar(.gz) file(s) under given path {}!".format(len(DATASET), args.image_text_folder))
-    elif ("http://" in args.image_text_folder.lower()) | ("https://" in args.image_text_folder.lower()):
-        DATASET=f"pipe:curl -L -s {args.image_text_folder} || true"
-        tqdm.write("Found {} http(s) link under given path!".format(len(DATASET), args.image_text_folder))
-    elif "gs://" in args.image_text_folder.lower():
-        DATASET=f"pipe:gsutil cat {args.image_text_folder} || true"
-        tqdm.write("Found {} GCS link under given path!".format(len(DATASET), args.image_text_folder))
-    elif ".tar" in args.image_text_folder:
-        DATASET=args.image_text_folder
-        tqdm.write("Found WebDataset .tar(.gz) file under given path {}!".format(args.image_text_folder))
-    else:
-        raise Exception("No folder, no .tar(.gz) and no url pointing to tar files provided under {}.".format(args.image_text_folder))
-
-# initialize distributed backend
-
-distr_backend = distributed_utils.set_backend_from_args(args)
-distr_backend.initialize()
-using_deepspeed = distributed_utils.using_backend(distributed_utils.DeepSpeedBackend)
-is_root = distr_backend.is_root_worker()
-
-# tokenizer
+assert Path(args.image_text_folder).exists(), f"The path {args.image_text_folder} was not found."
 
 if exists(args.bpe_path):
     klass=HugTokenizer if args.hug else YttmTokenizer
@@ -223,13 +195,7 @@ elif args.chinese:
 
 if RESUME:
     dalle_path=Path(DALLE_PATH)
-    if using_deepspeed:
-        cp_dir=cp_path_to_dir(dalle_path, "ds")
-        assert cp_dir.is_dir(), \
-            f"DeepSpeed checkpoint directory {cp_dir} not found"
-        dalle_path=cp_dir / DEEPSPEED_CP_AUX_FILENAME
-    else:
-        assert dalle_path.exists(), "DALL-E model file does not exist"
+    assert dalle_path.exists(), "DALL-E model file does not exist"
     loaded_obj=torch.load(str(dalle_path), map_location="cpu")
 
     dalle_params, vae_params, weights=loaded_obj["hparams"], loaded_obj["vae_params"], loaded_obj["weights"]
@@ -262,8 +228,7 @@ else:
         vae=DiscreteVAE(**vae_params)
         vae.load_state_dict(weights)
     else:
-        if is_root:
-            tqdm.write("using pretrained VAE for encoding images to tokens")
+        tqdm.write("using pretrained VAE for encoding images to tokens")
         vae_params=None
 
         if args.taming:
@@ -317,8 +282,6 @@ def group_weight(model):
 
 # create dataset and dataloader
 
-is_shuffle=not distributed_utils.using_backend(distributed_utils.HorovodBackend)
-
 imagepreproc=T.Compose([
     T.Lambda(lambda img: img.convert("RGB")
     if img.mode != "RGB" else img),
@@ -328,8 +291,7 @@ imagepreproc=T.Compose([
     T.ToTensor(),
 ])
 
-def imagetransform(b):
-    return Image.open(BytesIO(b))
+def imagetransform(b): return Image.open(BytesIO(b))
 
 def tokenize(s):
     return tokenizer.tokenize(
@@ -337,84 +299,33 @@ def tokenize(s):
         TEXT_SEQ_LEN,
         truncate_text=args.truncate_captions).squeeze(0)
 
-if ENABLE_WEBDATASET:
-    DATASET_SIZE=int(1e9) # You need to set a nominal length for the Dataset in order to avoid warnings from DataLoader
+ds = TextImageDataset(
+    args.image_text_folder,
+    text_len=TEXT_SEQ_LEN,
+    image_size=IMAGE_SIZE,
+    resize_ratio=args.resize_ratio,
+    truncate_captions=args.truncate_captions,
+    tokenizer=tokenizer,
+    shuffle=False, # DataLoader does this
+)
+assert len(ds) > 0, "dataset is empty"
 
-    myimg, mycap=WEBDATASET_IMAGE_TEXT_COLUMNS
-    image_text_mapping={
-        myimg: imagetransform,
-        mycap: tokenize
-    }
-    image_mapping={
-        myimg: imagepreproc
-    }
+tqdm.write(f"{len(ds)} image-text pairs found for training")
+dl = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
-    def filter_dataset(item): # For e.g. C@H which (rarely) has no caption available.
-        if mycap not in item:
-            return False
-        if myimg not in item:
-            return False
-        return True
+dalle = nn.DataParallel(DALLE(vae=vae, **dalle_params), device_ids=args.gpus).to(device)
 
-    w_dataset=wds.WebDataset(DATASET, handler=wds.warn_and_continue)
-    filtered_dataset=w_dataset.select(filter_dataset)
-    ds=filtered_dataset.map_dict(**image_text_mapping).map_dict(**image_mapping).to_tuple(mycap, myimg).batched(BATCH_SIZE / distr_backend.get_world_size(), partial=True)
-else:
-    ds=TextImageDataset(
-        args.image_text_folder,
-        text_len=TEXT_SEQ_LEN,
-        image_size=IMAGE_SIZE,
-        resize_ratio=args.resize_ratio,
-        truncate_captions=args.truncate_captions,
-        tokenizer=tokenizer,
-        shuffle=is_shuffle,
-    )
-    assert len(ds) > 0, "dataset is empty"
+if args.fp16:
+    dalle=dalle.half()
+dalle=dalle.to("cuda:0")
 
-if is_root:
-    if not ENABLE_WEBDATASET:
-        tqdm.write(f"{len(ds)} image-text pairs found for training")
-
-# data sampler
-
-data_sampler=None
-
-if not is_shuffle:
-    data_sampler=torch.utils.data.distributed.DistributedSampler(
-        ds,
-        num_replicas=distr_backend.get_world_size(),
-        rank=distr_backend.get_rank()
-    )
-
-# WebLoader for WebDataset and DeepSpeed compatibility
-
-if ENABLE_WEBDATASET:
-    dl=wds.WebLoader(ds, batch_size=None, shuffle=False, num_workers=4) # optionally add num_workers=2 (n) argument
-    number_of_batches=DATASET_SIZE // (BATCH_SIZE * distr_backend.get_world_size())
-    dl=dl.slice(number_of_batches)
-    dl.length=number_of_batches
-else:
-    # Regular DataLoader for image-text-folder datasets
-    dl=DataLoader(ds, batch_size=BATCH_SIZE, shuffle=is_shuffle, drop_last=True, sampler=data_sampler)
-
-# initialize DALL-E
-
-dalle=DALLE(vae=vae, **dalle_params)
-
-if not using_deepspeed:
-    if args.fp16:
-        dalle=dalle.half()
-    dalle=dalle.to("cuda:0")
-
-if RESUME and not using_deepspeed:
-    dalle.load_state_dict(weights)
+if RESUME: dalle.load_state_dict(weights)
 
 # optimizer
 
 opt=Adam(get_trainable_params(dalle), lr=LEARNING_RATE)
 
-if RESUME and opt_state:
-    opt.load_state_dict(opt_state)
+if RESUME and opt_state: opt.load_state_dict(opt_state)
 
 # scheduler
 
@@ -435,86 +346,27 @@ if LR_DECAY:
 
 # experiment tracker
 
-if is_root:
-
-    model_config=dict(
-        depth=DEPTH,
-        heads=HEADS,
-        dim_head=DIM_HEAD
-    )
-
-    training_config = dict(
-        lr=args.learning_rate,
-        lr_decay=args.lr_decay,
-        grad_clip_norm=GRAD_CLIP_NORM,
-        bs=BATCH_SIZE,
-        epochs=EPOCHS,
-    )
-
-    run=wandb.init(
-        project=args.wandb_name,
-        entity=args.wandb_entity,
-        resume=False,
-        mode="online" if args.wandb else "disabled",
-        config=model_config | training_config,
-    )
-
-# distribute
-
-distr_backend.check_batch_size(BATCH_SIZE)
-deepspeed_config={
-    "train_batch_size": BATCH_SIZE,
-    "gradient_accumulation_steps": args.ga_steps,
-    "gradient_clipping": GRAD_CLIP_NORM,
-    "fp16": {
-        "enabled": args.fp16,
-    },
-    "amp": {
-        "enabled": args.amp,
-        "opt_level": "O1",
-    },
-    "flops_profiler": {
-        "enabled": args.flops_profiler,
-        "profile_step": 200,
-        "module_depth": -1,
-        "top_modules": 1,
-        "detailed": True,
-        "output_file": None # TODO Can"t get this to work.
-    },
-}
-
-if deepspeed_config.get("zero_optimization", {}).get("stage", 0) >= 2:
-    tqdm.write(f"Checkpoints made with DeepSpeed ZeRO Stages 2 and 3 will be stored in deepspeed checkpoint folder")
-    tqdm.write(f"As such, they will require DeepSpeed as a dependency in order to resume from or generate with.")
-    tqdm.write("See the deespeed conversion script for details on how to convert your ZeRO stage 2/3 checkpoint to a single file.")
-    tqdm.write("If using a single GPU, consider running with apex automatic mixed precision instead for a similar speedup to ZeRO.")
-    time.sleep(2)
-
-(distr_dalle, distr_opt, distr_dl, distr_scheduler)=distr_backend.distribute(
-    args=args,
-    model=dalle,
-    optimizer=opt,
-    model_parameters=get_trainable_params(dalle),
-    training_data=(
-        (None if ENABLE_WEBDATASET else ds)
-        if using_deepspeed
-        else dl
-    ),
-    # Do not pass the LR scheduler to DeepSpeed so we can manually
-    # advance it.
-    lr_scheduler=scheduler if LR_DECAY and not using_deepspeed else None,
-    config_params=deepspeed_config,
+model_config=dict(
+    depth=DEPTH,
+    heads=HEADS,
+    dim_head=DIM_HEAD
 )
-# Prefer scheduler in `deepspeed_config`.
 
-if LR_DECAY and distr_scheduler is None:
-    distr_scheduler=scheduler
+training_config = dict(
+    lr=args.learning_rate,
+    lr_decay=args.lr_decay,
+    grad_clip_norm=GRAD_CLIP_NORM,
+    bs=BATCH_SIZE,
+    epochs=EPOCHS,
+)
 
-avoid_model_calls=using_deepspeed and args.fp16
-
-if RESUME and using_deepspeed:
-    distr_dalle.load_checkpoint(str(cp_dir))
-
+run=wandb.init(
+    project=args.wandb_name,
+    entity=args.wandb_entity,
+    resume=False,
+    mode="online" if args.wandb else "disabled",
+    config=model_config | training_config,
+)
 
 def save_model(path, epoch=0):
     save_obj={
@@ -524,37 +376,6 @@ def save_model(path, epoch=0):
         "version": get_pkg_version(),
         "vae_class_name": vae.__class__.__name__
     }
-
-    if using_deepspeed:
-        cp_dir=cp_path_to_dir(path, "ds")
-
-        if KEEP_N_CHECKPOINTS is not None and is_root:
-            checkpoints=sorted(glob(str(cp_dir / "global*")), key=os.path.getmtime, reverse=True)
-            for checkpoint in checkpoints[KEEP_N_CHECKPOINTS:]:
-                shutil.rmtree(checkpoint)
-
-        distr_dalle.save_checkpoint(cp_dir, client_state=save_obj)
-
-        if not is_root:
-            return
-
-        # Save auxiliary values so we can reuse the standard routine
-        # for loading.
-        save_obj={
-            **save_obj,
-            # Save a nonsense value that directs the user to
-            # further help.
-            "weights": (
-                "To get a working standard checkpoint, "
-                "look into consolidating DeepSpeed checkpoints."
-            ),
-        }
-        torch.save(save_obj, str(cp_dir / DEEPSPEED_CP_AUX_FILENAME))
-        if deepspeed_config.get("zero_optimization", {}).get("stage", 0) >= 2: # see https://github.com/lucidrains/DALLE-pytorch/wiki/DeepSpeed-Checkpoints
-            return
-
-    if not is_root:
-        return
 
     save_obj={
         **save_obj,
@@ -578,62 +399,42 @@ def save_artifact(model_config, model_path, name="trained-dalle"):
 save_model(DALLE_OUTPUT_FILE_NAME, epoch=resume_epoch)
 
 for epoch in tqdm(range(resume_epoch, EPOCHS), desc="Epochs"):
-    if data_sampler:
-        data_sampler.set_epoch(epoch)
 
-    enumerated=dl if ENABLE_WEBDATASET else distr_dl
-    for i, (text, images) in tqdm(enumerate(enumerated), desc="Batches", leave=False, total=len(enumerated)):
-        if i % 10 == 0 and is_root:
-            t=time.time()
+    for i, (text, images) in tqdm(enumerate(dl), desc="Batches", leave=False, total=len(dl)):
+        if i % 10 == 0:
+            t = time.time()
 
-        if args.fp16:
-            images=images.half()
-
-        text, images=map(lambda t: t.to("cuda:0"), (text, images))
-
-        loss=distr_dalle(text, images, return_loss=True)
-
-        if using_deepspeed:
-            distr_dalle.backward(loss)
-            distr_dalle.step()
-            # Gradients are automatically zeroed after the step
-        else:
-            loss.backward()
-            clip_grad_norm_(distr_dalle.parameters(), GRAD_CLIP_NORM)
-            distr_opt.step()
-            distr_opt.zero_grad()
-
-        # Collective loss, averaged
-        avg_loss=distr_backend.average_all(loss)
+        text, images = map(lambda t: t.to(device), (text, images))
+        loss = dalle(text, images, return_loss=True)
+        loss.backward()
+        clip_grad_norm_(dalle.parameters(), GRAD_CLIP_NORM)
+        opt.step()
+        opt.zero_grad()
 
         log={}
 
-        if i % 1000 == 0 and is_root:
-            tqdm.write(f"epoch {epoch:3} | iter {i:7} | loss_tr {avg_loss.item()}")
+        if i % 1000 == 0:
+            tqdm.write(f"epoch {epoch:3} | iter {i:7} | loss_tr {loss.item()}")
 
             log={
                 **log,
                 "epoch": epoch,
                 "iter": i,
-                "loss": avg_loss.item()
+                "loss": loss.item()
             }
 
         if i % SAVE_EVERY_N_STEPS == 0:
             save_model(DALLE_OUTPUT_FILE_NAME, epoch=epoch)
 
-        if i % 100 == 0 and is_root:
+        if i % 100 == 0:
             sample_text=text[:1]
             token_list=sample_text.masked_select(sample_text != 0).tolist()
             decoded_text=tokenizer.decode(token_list)
 
-            if not avoid_model_calls:
-                # CUDA index errors when we don"t guard this
-                image=dalle.generate_images(text[:1], filter_thres=0.9)  # topk sampling at 0.9
+            image=dalle.module.generate_images(text[:1], filter_thres=0.9)  # topk sampling at 0.9
+            log["image"]=wandb.Image(image, caption=decoded_text)
 
-            if not avoid_model_calls:
-                log["image"]=wandb.Image(image, caption=decoded_text)
-
-        if i % 1000 == 9 and is_root:
+        if i % 1000 == 9:
             sample_per_sec=BATCH_SIZE * 10 / (time.time() - t)
             log["sample_per_sec"]=sample_per_sec
             tqdm.write(f"epoch {epoch:3} | iter {i:7} | sample_per_sec {sample_per_sec}")
@@ -641,21 +442,16 @@ for epoch in tqdm(range(resume_epoch, EPOCHS), desc="Epochs"):
         if i == 201 and args.flops_profiler:
             raise StopIteration("Profiler has finished running. Stopping training early.")
 
-        if is_root:
-            wandb.log(log)
+        wandb.log(log)
 
-    if LR_DECAY:
-        distr_scheduler.step(avg_loss)
+    if LR_DECAY: scheduler.step(loss)
 
     save_model(DALLE_OUTPUT_FILE_NAME, epoch=epoch)
 
-    if is_root:
-        # save trained model to wandb as an artifact every epoch"s end
-        save_artifact(model_config, DALLE_OUTPUT_FILE_NAME)
+    save_artifact(model_config, DALLE_OUTPUT_FILE_NAME)
 
 save_model(DALLE_OUTPUT_FILE_NAME, epoch=epoch)
 
-if is_root:
-    wandb.save(DALLE_OUTPUT_FILE_NAME)
-    save_artifact(model_config, DALLE_OUTPUT_FILE_NAME)
-    wandb.finish()
+wandb.save(DALLE_OUTPUT_FILE_NAME)
+save_artifact(model_config, DALLE_OUTPUT_FILE_NAME)
+wandb.finish()
