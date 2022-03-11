@@ -403,6 +403,8 @@ def save_artifact(model_config, model_path, name="trained-dalle"):
 
 save_model(DALLE_OUTPUT_FILE_NAME, epoch=resume_epoch)
 scaler = GradScaler()
+print_iter = len(dl) // 10
+tqdm.write(f"Will print every {print_iter} iterations")
 for epoch in tqdm(range(resume_epoch, EPOCHS), desc="Epochs"):
 
     for i, (text, images) in tqdm(enumerate(dl), desc="Batches", leave=False, total=len(dl)):
@@ -422,7 +424,7 @@ for epoch in tqdm(range(resume_epoch, EPOCHS), desc="Epochs"):
 
         log={}
 
-        if i % 1000 == 0:
+        if i % print_iter == 0:
             tqdm.write(f"epoch {epoch:3} | iter {i:7} | loss_tr {loss.item()}")
 
             log={
@@ -443,8 +445,8 @@ for epoch in tqdm(range(resume_epoch, EPOCHS), desc="Epochs"):
             image=dalle.module.generate_images(text[:1], filter_thres=0.9)  # topk sampling at 0.9
             log["image"]=wandb.Image(image, caption=decoded_text)
 
-        if i % 1000 == 9:
-            sample_per_sec=BATCH_SIZE * 10 / (time.time() - t)
+        if i % print_iter == 9:
+            sample_per_sec=BATCH_SIZE * print_iter / (time.time() - t)
             log["sample_per_sec"]=sample_per_sec
             tqdm.write(f"epoch {epoch:3} | iter {i:7} | sample_per_sec {sample_per_sec}")
 
