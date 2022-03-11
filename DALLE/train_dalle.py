@@ -413,7 +413,7 @@ for epoch in tqdm(range(resume_epoch, EPOCHS), desc="Epochs"):
 
         with autocast():
             text, images = map(lambda t: t.to(device), (text, images))
-            loss = dalle(text, images, return_loss=True).mean()
+            loss = dalle(text, images, return_loss=True)
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         clip_grad_norm_(dalle.parameters(), GRAD_CLIP_NORM)
