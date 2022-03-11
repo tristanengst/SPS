@@ -24,7 +24,12 @@ from torchvision import transforms as T
 from PIL import Image
 from io import BytesIO
 
+from torch.cuda.amp import GradScaler
+from torch.cuda.amp import autocast
+
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
+torch.backends.cudnn.benchmark = True
 
 parser=argparse.ArgumentParser()
 parser.add_argument("--wandb", choices=[0, 1], default=1, type=int,
@@ -311,7 +316,7 @@ ds = TextImageDataset(
 assert len(ds) > 0, "dataset is empty"
 
 tqdm.write(f"{len(ds)} image-text pairs found for training")
-dl = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+dl = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True, num_workers=6)
 
 dalle = nn.DataParallel(DALLE(vae=vae, **dalle_params), device_ids=args.gpus).to(device)
 
@@ -321,11 +326,11 @@ dalle=dalle.to("cuda:0")
 
 if RESUME: dalle.load_state_dict(weights)
 
-# optimizer
+# optimizerimizer
 
-opt=Adam(get_trainable_params(dalle), lr=LEARNING_RATE)
+optimizer=Adam(get_trainable_params(dalle), lr=LEARNING_RATE)
 
-if RESUME and opt_state: opt.load_state_dict(opt_state)
+if RESUME and opt_state: optimizer.load_state_dict(opt_state)
 
 # scheduler
 
@@ -333,7 +338,7 @@ scheduler=None
 
 if LR_DECAY:
     scheduler=ReduceLROnPlateau(
-        opt,
+        optimizer,
         mode="min",
         factor=0.5,
         patience=10,
@@ -380,7 +385,7 @@ def save_model(path, epoch=0):
     save_obj={
         **save_obj,
         "weights": dalle.state_dict(),
-        "opt_state": opt.state_dict(),
+        "opt_state": optimizer.state_dict(),
         "scheduler_state": (scheduler.state_dict() if scheduler else None)
     }
 
@@ -397,19 +402,23 @@ def save_artifact(model_config, model_path, name="trained-dalle"):
 # See https://github.com/lucidrains/DALLE-pytorch/wiki/DeepSpeed-Checkpoints
 
 save_model(DALLE_OUTPUT_FILE_NAME, epoch=resume_epoch)
-
+scaler = GradScaler()
 for epoch in tqdm(range(resume_epoch, EPOCHS), desc="Epochs"):
 
     for i, (text, images) in tqdm(enumerate(dl), desc="Batches", leave=False, total=len(dl)):
         if i % 10 == 0:
             t = time.time()
 
-        text, images = map(lambda t: t.to(device), (text, images))
-        loss = dalle(text, images, return_loss=True)
-        loss.backward()
+        optimizer.zero_grad(set_to_none=True)
+
+        with autocast():
+            text, images = map(lambda t: t.to(device), (text, images))
+            loss = dalle(text, images, return_loss=True)
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         clip_grad_norm_(dalle.parameters(), GRAD_CLIP_NORM)
-        opt.step()
-        opt.zero_grad()
+        scaler.step(optimizer)
+        scaler.update()
 
         log={}
 
