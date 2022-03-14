@@ -650,4 +650,19 @@ class DALLE(nn.Module):
         loss_img = F.cross_entropy(logits[:, :, self.text_seq_len:], labels[:, self.text_seq_len:])
 
         loss = (loss_text + self.loss_img_weight * loss_img) / (self.loss_img_weight + 1)
+
+        print("    IMAGE SHAPE", image.shape)
+        print("    OFFSET_IMAGE SHAPE", offsetted_image.shape)
+        print("    IMAGE SHAPE", image.shape)
+        print("    IMAGE SHAPE", image.shape)
+        print("    IMAGE SHAPE", image.shape)
+        print("    IMAGE SHAPE", image.shape)
+
         return loss
+
+class DALLELoss(nn.Module):
+
+    def __init__(self):
+        super(DALLELoss, self)._init__()
+
+    def forward(self, )
