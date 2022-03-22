@@ -48,6 +48,6 @@ if __name__ == "__main__":
             #     args.output_dir,
             # )
             text_output_file = f"{data_dir}/{cap}"
-            image_output_file = f"{data_dir}/{img}}"
+            image_output_file = f"{data_dir}/{img}"
             shutil.copy(f"{args.image_dir}/{img_cls}/{img}", image_output_file)
             shutil.copy(f"{args.caption_dir}/{txt_cls}/{cap}", text_output_file)
