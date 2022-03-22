@@ -42,8 +42,12 @@ if __name__ == "__main__":
             raise ValueError("Got different A")
 
         for img,cap in zip(images, captions):
-            create_files(
-                f"{args.image_dir}/{img_cls}/{img}",
-                f"{args.caption_dir}/{txt_cls}/{cap}",
-                args.output_dir,
-            )
+            # create_files(
+            #     f"{args.image_dir}/{img_cls}/{img}",
+            #     f"{args.caption_dir}/{txt_cls}/{cap}",
+            #     args.output_dir,
+            # )
+            text_output_file = f"{data_dir}/{cap}"
+            image_output_file = f"{data_dir}/{img}}"
+            shutil.copy(f"{args.image_dir}/{img_cls}/{img}", image_output_file)
+            shutil.copy(f"{args.caption_dir}/{txt_cls}/{cap}", text_output_file)
