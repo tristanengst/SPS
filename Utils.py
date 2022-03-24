@@ -28,6 +28,3 @@ def set_seed(seed):
         tqdm.write(f"Reseeded program with old seed")
     else:
         raise ValueError(f"Seed should be int or contain resuming keys")
-
-def preprocess_str(s):
-    return s.translate(str.maketrans("", "", string.punctuation)).lower()

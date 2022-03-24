@@ -100,7 +100,7 @@ if __name__ == "__main__":
     args = P.parse_args()
 
     data = TextDataset(f"{args.data_dir}/{args.data}/train", transform="basic",
-        include_original=True, apply_n_times=4)
+        include_original=True, apply_n_times=4, return_tokens_too=False)
 
     for idx in range(10):
         tqdm.write(f"{data[idx]}")

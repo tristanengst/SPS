@@ -1,10 +1,14 @@
 import argparse
 
-import pytorch_lightning as pl
+from sentence_transformers import SentenceTransformer
+from sentence_transformers import util as sentence_transformer_utils
+
 
 import torch
 import torch.nn as nn
 from torch.optim import Adam, CosineAnnealingWarmRestarts
+
+from Tokenizer import SimpleTokenizer
 
 
 class SPSModel(nn.Module):
@@ -42,16 +46,16 @@ def get_loss_fn(lpips_frac=0):
         return SPSLoss()
 
 
-text_distance_model = None
-def get_text_distances(x, y):
-    """
-    """
-    global text_distance_model
-    if text_distance_model is None:
-        text_distance_model = None
+text_sim_model = None
+def get_text_distances(sentences):
+    """Returns a Tensor of all pairwise cosine distances among [sentences]."""
+    global text_sim_model
+    if text_sim_model is None:
+        text_sim_model = SentenceTransformer("bert-base-nli-mean-tokens", device=device)
 
-
-    return distances
+    embeddings = text_sim_model.encode(sentences, convert_to_tensor=True,
+        device=device, normalize_embeddings=True)
+    return sentence_transformer_utils.dot_score(embeddings, embeddings)
 
 def one_epoch(dalle, model, optimizer, loader, text_augmenter, scheduler,
     logger, grad_norm=2, num_prints=10, **kwargs):
@@ -59,12 +63,11 @@ def one_epoch(dalle, model, optimizer, loader, text_augmenter, scheduler,
     """
     total_loss = 0
     scaler = GradScaler()
-    for idx,(s1,s2) in tqdm(loader, desc="Batches", leave=False, dynamic_ncols=True):
-
+    for idx,(sentences,tokens) in tqdm(loader, desc="Batches", leave=False, dynamic_ncols=True):
         with autocast():
             with torch.no_grad():
-                distances = get_text_distance(s1, s2)
-                x1, x2 = dalle(s1, s2)
+                distances = get_text_distance(sentences)
+                images = dalle(tokens)
 
             loss = loss_fn(model(x1), model(x2), distances)
 
