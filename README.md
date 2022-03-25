@@ -6,17 +6,24 @@ The order and sources of package installation is nontrivial and important:
     ```
     conda create -n py39SPS python=3.9
     ```
-2. Install PyTorch _through conda_, as well as some other utiltiies:
+2. Install PyTorch _through conda_, as well as some other utilities:
     ```
     conda install pytorch torchvision cudatoolkit=11.3 -c pytorch
     conda install wandb -c conda-forge
+    conda install -c conda-forge spacy
+    conda install -c conda-forge cupy
+    python -m spacy download en_core_web_lg
+    conda install -c conda-forge sentence-transformers
     conda install tqdm cython
     ```
 3. Install `dalle-pytorch`:
     ```
     pip install dalle-pytorch
     ```
-    
+4. Install PIP PyTorch:
+    ```
+    pip3 install torch==1.11.0+cu113 torchvision==0.12.0+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html
+    ```
 ## Data Setup
 Download the MS-COCO validation split [images](http://images.cocodataset.org/zips/val2014.zip) and [annotations](http://images.cocodataset.org/annotations/annotations_trainval2014.zip). Unzip both files, and properly format the data:
 ```
