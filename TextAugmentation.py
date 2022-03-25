@@ -86,7 +86,7 @@ class BasicTextTransform(nn.Module):
 
     def forward(self, t):
         if self.include_original and self.apply_n_times > 1:
-            return [t] + [self.augment_str(t) for _ in range(self.apply_n_times - 2)]
+            return [t] + [self.augment_str(t) for _ in range(self.apply_n_times - 1)]
         else:
             return [self.augment_str(t) for _ in range(self.apply_n_times)]
 

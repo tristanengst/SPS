@@ -5,17 +5,16 @@ from TextAugmentation import *
 from Tokenizer import SimpleTokenizer
 from Utils import *
 
-datasets = []
-
 def read_text_files_to_list(folder):
     """Returns a list where the [ith] element is the string that is the [ith]
     text file in [folder] according to alphabetization.
     """
     text_files = sorted([f for f in os.listdir(folder) if f.endswith(".txt")])
-    result = [None] * len(text_files)
-    for idx,file in enumerate(text_files):
+    result = []
+    for file in text_files:
         with open(f"{folder}/{file}", "r") as f:
-            result[idx] = f.read()
+            lines = f.read().split("/n")
+            result += lines
 
     return result
 
@@ -26,7 +25,7 @@ class TextDataset(Dataset):
     Args:
     source          -- folder containing text and image files
     transform       -- function for augmenting strings of text, or string
-                        describing it
+                        describing it, eg. 'basic'
     """
     def __init__(self, source, transform="basic", apply_n_times=2, memoize=True,
             use_memoized=True, include_original=True, return_tokens_too=True,
