@@ -28,10 +28,12 @@ if __name__ == "__main__":
         help="COCO data annoations JSON")
     P.add_argument("--images", required=True, type=str,
         help="Folder containing images")
-    P.add_argument("--num_val", type=int, default=50,
+    P.add_argument("--num_val", type=int, default=0,
         help="Number of images taken for validation")
     P.add_argument("--seed", type=int, default=0,
         help="Random seed for dataset splitting")
+    P.add_argument("--keep_existing", default=0, choices=[0, 1],
+        help="Add to existing files in folder")
     args = P.parse_args()
 
     data_dir = args.data_dir
