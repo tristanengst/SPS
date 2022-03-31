@@ -178,7 +178,7 @@ def one_epoch(sps_model, optimizer, loader, scheduler, grad_norm=float("inf"),
     for idx,sentences in tqdm(enumerate(loader), total=len(loader), desc="Batches", leave=False, dynamic_ncols=True):
         with autocast():
             with torch.no_grad():
-                images = torch.cat([glide_generate(s) for s in sentences], axis=0).to("cuda:0")
+                images = glide_generate(sentences).to("cuda:0")
                 text_distances = get_text_distances(sentences)
 
             fx = sps_model(images)

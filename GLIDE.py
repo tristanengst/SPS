@@ -55,8 +55,12 @@ upsample_temp = 0.997
 
 # Create the text tokens to feed to the glide.
 tokens = glide.tokenizer.encode(prompt)
+tokens2 = glide.tokenizer.encode("A red computer")
 tokens, mask = glide.tokenizer.padded_tokens_and_mask(
     tokens, options['text_ctx']
+)
+tokens2, mask2 = glide.tokenizer.padded_tokens_and_mask(
+    tokens2, options['text_ctx']
 )
 
 # Create the classifier-free guidance tokens (empty)
@@ -64,14 +68,17 @@ full_batch_size = batch_size * 2
 uncond_tokens, uncond_mask = glide.tokenizer.padded_tokens_and_mask(
     [], options['text_ctx']
 )
+uncond_tokens2, uncond_mask2 = glide.tokenizer.padded_tokens_and_mask(
+    [], options['text_ctx']
+)
 
 # Pack the tokens together into glide kwargs.
 model_kwargs = dict(
     tokens=torch.tensor(
-        [tokens] * batch_size + [uncond_tokens] * batch_size, device=device
+        [tokens] + [tokens2] + [uncond_tokens] + [uncond_tokens2], device=device
     ),
     mask=torch.tensor(
-        [mask] * batch_size + [uncond_mask] * batch_size,
+        [mask] + [mask2] + [uncond_mask] + [uncond_mask2],
         dtype=torch.bool,
         device=device,
     ),
@@ -87,36 +94,69 @@ def model_fn(x_t, ts, **kwargs):
     half_eps = uncond_eps + guidance_scale * (cond_eps - uncond_eps)
     eps = torch.cat([half_eps, half_eps], dim=0)
     return torch.cat([eps, rest], dim=1)
-
-# Sample from the base glide.
-glide.del_cache()
-samples = diffusion.p_sample_loop(
-    model_fn,
-    (full_batch_size, 3, options["image_size"], options["image_size"]),
-    device=device,
-    clip_denoised=True,
-    progress=True,
-    model_kwargs=model_kwargs,
-    cond_fn=None,
-)[:batch_size]
-glide.del_cache()
-
-# # Show the output
+#
+# # Sample from the base glide.
+# glide.del_cache()
+# samples = diffusion.p_sample_loop(
+#     model_fn,
+#     (4, 3, options["image_size"], options["image_size"]),
+#     device=device,
+#     clip_denoised=True,
+#     progress=True,
+#     model_kwargs=model_kwargs,
+#     cond_fn=None,
+# )[:2]
+# glide.del_cache()
+#
+# # # Show the output
 # scaled = ((samples + 1)*127.5).round().clamp(0,255).to(torch.uint8).cpu()
-# plt.imshow(scaled.squeeze(0).cpu().permute(1, 2, 0)  )
-# plt.show()
+#
+# print("AAAAA", scaled.shape)
+#
+# for s in scaled:
+#     plt.imshow(s.permute(1, 2, 0)  )
+#     plt.show()
 
-def glide_generate(prompt):
+def glide_generate(prompts):
+    batch_size = len(prompts)
+    tokens = [glide.tokenizer.encode(p) for p in prompts]
+    tokens_and_masks = [glide.tokenizer.padded_tokens_and_mask(t, options['text_ctx']) for t in tokens]
+    tokens = [t for t,_ in tokens_and_masks]
+    masks = [m for _,m in tokens_and_masks]
+
+    # Create the classifier-free guidance tokens (empty)
+    full_batch_size = batch_size * 2
+    uncond_tokens, uncond_mask = glide.tokenizer.padded_tokens_and_mask([], options['text_ctx'])
+
+    # Pack the tokens together into glide kwargs.
+    model_kwargs = dict(
+        tokens=torch.tensor(
+            tokens + [uncond_tokens] * batch_size, device=device
+        ),
+        mask=torch.tensor(
+            masks + [uncond_mask] * batch_size,
+            dtype=torch.bool,
+            device=device,
+        ),
+    )
+
     glide.del_cache()
     samples = diffusion.p_sample_loop(
         model_fn,
         (full_batch_size, 3, options["image_size"], options["image_size"]),
         device=device,
         clip_denoised=True,
-        progress=False,
+        progress=True,
         model_kwargs=model_kwargs,
         cond_fn=None,
     )[:batch_size]
     glide.del_cache()
 
+    # scaled = ((samples + 1)*127.5).round().clamp(0,255).to(torch.uint8).cpu()
+    # for s in scaled:
+    #     plt.imshow(s.permute(1, 2, 0)  )
+    #     plt.show()
+
     return (samples + 1) / 2
+
+# glide_generate(["a painting of a blue bird", "a painting of a red cat", "a painting of a purple apple"])
