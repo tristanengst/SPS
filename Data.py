@@ -18,7 +18,29 @@ def read_text_files_to_list(folder):
 
     return result
 
-class TextDataset(Dataset):
+def collate_fn(list_of_inputs):
+    return [x[0] for x in list_of_inputs] + [x[1] for x in list_of_inputs]
+
+class HumanAugmentationTextDataset(Dataset):
+    """
+    """
+
+    def __init__(self, source, num_samples=2, data_path=f"{project_dir}/data"):
+        super(HumanAugmentationTextDataset, self).__init__()
+        self.num_samples = num_samples
+        self.file2texts = []
+        self.files = sorted([f for f in os.listdir(f"{data_path}/{source}") if f.endswith(".txt")])
+        for file in self.files:
+            with open(f"{data_path}/{source}/{file}", "r") as f:
+                texts = f.read().split("\n")
+                self.file2texts.append([t for t in texts if not t == ""])
+
+    def __len__(self): return len(self.file2texts)
+
+    def __getitem__(self, idx):
+        return random.sample(self.file2texts[idx], self.num_samples)
+
+class AugmentedTextDataset(Dataset):
     """Dataset for returning strings of text. To avoid GPU difficulties, finding
     the distance between returned strings must be handled somewhere else.
 
@@ -30,7 +52,7 @@ class TextDataset(Dataset):
     def __init__(self, source, transform="basic", apply_n_times=2, memoize=True,
             use_memoized=True, include_original=True, return_tokens_too=True,
             **kwargs):
-        super(TextDataset, self).__init__()
+        super(AugmentedTextDataset, self).__init__()
         self.tokenizer = SimpleTokenizer()
         self.return_tokens_too = return_tokens_too
         self.data = read_text_files_to_list(source)

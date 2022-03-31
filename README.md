@@ -14,25 +14,24 @@ The order and sources of package installation is nontrivial and important:
     conda install -c conda-forge cupy
     python -m spacy download en_core_web_lg
     conda install -c conda-forge sentence-transformers
-    conda install tqdm cython
     ```
-3. Install `dalle-pytorch`:
-    ```
-    pip install dalle-pytorch
-    ```
-4. Install PIP PyTorch:
-    ```
-    pip3 install torch==1.11.0+cu113 torchvision==0.12.0+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html
-    ```
+3. Install GLIDE (filtered).
+
 ## Data Setup
 Download the MS-COCO validation split [images](http://images.cocodataset.org/zips/val2014.zip) and [annotations](http://images.cocodataset.org/annotations/annotations_trainval2014.zip). Unzip both files, and properly format the data:
 ```
 python FormatCOCO.py --annotations PATH_TO_ANNOTATIONS --images PATH_TO_IMAGES
 ```
 
-## Train DALL-E
-We use the implementation here
 
-```
-python DALLE/train_dalle.py --taming --image_text_folder data/coco_captions_images --
-```
+
+
+
+
+## Method
+As originally formulated, this project involved interesting text augmentation and a corresponding loss function. This all relied on a good text-to-image model, which apparently doesn't exist. I've decided that the best option is GLIDE (filtered), but this doesn't do an adequate job of generating images that actually match an input caption to make the proposed method work.
+
+**There are a few different things to be done:**
+1. Large batch training isn't possible; GLIDE is too slow. We can just make batch sizes tiny (eg. 8) and hope for the best.
+2. To increase image quality, we can drop text augmentation. This allows precomputing text distances. 
+3. A worthwhile direction is something that amounts to roughly CLIP as a _perceptual_ distance metric. This could literally be CLIP + LPIPS. 

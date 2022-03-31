@@ -30,7 +30,7 @@ def get_lingkey2words(strs, print_stats=True, memoize=False, use_memoized=False)
         return torch.load(use_memoized)
 
     lingkey2words = defaultdict(lambda: [])
-    nlp = spacy.load("en_core_web_lg")
+    nlp = spacy.load("en_core_web_trf")
     for s in tqdm(strs, desc="Processing captions"):
         doc = nlp(s)
         for t in doc:

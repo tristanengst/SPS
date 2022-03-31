@@ -13,3 +13,9 @@ __pycache__
 data
 DALLE/wandb
 wandb
+glide_model_cache*
+*.txt
+minDALLE/
+dalle/
+models_sps/
+*.gz
