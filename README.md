@@ -1,28 +1,13 @@
 # semantic-perceptual-similarity
 
 ## Environment Setup
-The order and sources of package installation is nontrivial and important:
-1. Create a new conda environment with Python 3.9:
-    ```
-    conda create -n py39SPS python=3.9
-    ```
-2. Install PyTorch _through conda_, as well as some other utilities:
-    ```
-    conda install pytorch torchvision cudatoolkit=11.3 -c pytorch
-    conda install wandb -c conda-forge
-    conda install -c conda-forge sentence-transformers
-    ```
-3. Install the following:
-    ```
-    tokenizers>=0.10.2
-    pyflakes>=2.2.0
-    tqdm>=4.46.0
-    pytorch-lightning>=1.5
-    einops
-    omegaconf
-    git+https://github.com/openai/CLIP.git
-    matplotlib
-    ```
+```
+conda create -n py39SPS python=3.9
+conda activate py39SPS
+conda install pytorch torchvision cudatoolkit=11.3 -c pytorch
+conda install -c conda-forge wandb sentence-transformers tokenizers pyflakes tqdm pytorch-lightning einops omegaconf matplotlib
+pip install git+https://github.com/openai/CLIP.git
+```
 
 ## Data Setup
 **MS-COCO**

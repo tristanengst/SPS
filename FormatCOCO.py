@@ -18,11 +18,11 @@ import random
 import shutil
 from tqdm import tqdm
 
-from Utils import *
+from utils.Utils import *
 
 if __name__ == "__main__":
     P = argparse.ArgumentParser("")
-    P.add_argument("--data_dir", type=str, default=data_dir,
+    P.add_argument("--data_dir", type=str, default=f"{project_dir}/data",
         help="Directory for storing project data. Only override if nondefault")
     P.add_argument("--annotations", required=True, type=str,
         help="COCO data annoations JSON")
