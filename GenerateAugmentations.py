@@ -2,7 +2,11 @@ import argparse
 
 import DALLE
 from Data import TextDataset
+from torch.utils.data import DataLoader, Subset
 from torchvision.utils import save_image
+from utils.Utils import *
+
+quote_str = "\n\t"
 
 def generate_one_epoch(model, loader, epoch_number, save_path):
     """Generates images for one epoch.
@@ -36,6 +40,8 @@ if __name__ == "__main__":
         help="Number of epochs to generate data for")
     P.add_argument("--bs", type=int, default=1,
         help="ID of GPU to use")
+    P.add_argument("--start_stop_idxs", type=int, required=True, nargs=2,
+        help="ID of GPU to use")
     P.add_argument("--name", default=None, type=str,
         help="Name of dataset to generate")
     args = P.parse_args()
@@ -43,14 +49,16 @@ if __name__ == "__main__":
     # Get the captions and wrap a DataLoader over it
     data = TextDataset(f"{args.data}/{args.split}", data_path=args.data_path,
         return_idxs=True)
+    data = Subset(data, range(*args.start_stop_idxs))
+    tqdm.write(f"Found dataset containing {len(data)} captions. The first few:\n{quote_str + quote_str.join([data[i][1] for i in range(0,5)])}\n")
     loader = DataLoader(data, batch_size=args.bs, shuffle=False,
         num_workers=min(args.bs, 8))
-    model = DALLE.get_generate_images_fn(args.gpu)
+    model = DALLE.get_generate_images_fn(f"cuda:{args.gpu}")
 
     # Create folders to save images to. Each folder should contain a .txt file
     # containing the caption it goes with.
     args.name = f"gen_{args.data}" if args.name is None else args.name
-    save_path = f"{args.name}/{args.split}"
+    save_path = f"{args.data_path}/{args.name}/{args.split}"
     for idx,caption in tqdm(data, desc="Building data folder structure", dynamic_ncols=True):
         path = f"{args.data_path}/{save_path}/{idx}"
         if not os.path.exists(path):

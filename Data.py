@@ -1,6 +1,4 @@
 import os
-from torch.utils.data import Dataset
-from Utils import *
 
 def collate_fn(list_of_inputs):
     return [x[0] for x in list_of_inputs] + [x[1] for x in list_of_inputs]
@@ -27,7 +25,6 @@ from torchvision.datasets import ImageFolder, CIFAR10
 from torchvision import transforms
 from torchvision.transforms.functional import hflip
 
-from Corruptions import *
 from utils.Utils import *
 
 ################################################################################
@@ -46,9 +43,8 @@ datasets = ["cifar10", "miniImagenet", "coco"]
 no_val_split_datasets = ["cifar10"]
 small_image_datasets = ["cifar10"]
 data2split2n_class = {
-    "camnet3": {"train": 3, "val": 3},
     "cifar10": {"train": 10, "val": 10, "test": 10},
-    "miniImagenet": {"train": 64, "val": 16, "test": 20} # Not sure if these numbers are correct
+    "miniImagenet": {"train": 64, "val": 16, "test": 20}
 }
 
 def seed_kwargs(seed=0):
@@ -368,13 +364,20 @@ class TextDataset(Dataset):
         source = f"{data_path}/{source}"
 
         self.data = []
-        for folder in os.listdir():
-            text = None
-            image_files = []
-            for file in os.listdir(f"{data_path}/{source}/{folder}"):
+        for folder in os.listdir(source):
+            if folder.endswith(".txt"):
+                file = folder
                 if file.endswith(".txt"):
-                     with open(f"{source}/{folder}/{file}", "r") as f:
+                     with open(f"{source}/{file}", "r") as f:
                         self.data.append(f.read().strip().lower())
+            elif os.path.isdir(folder):
+                for file in os.listdir(f"{source}/{folder}"):
+                    if file.endswith(".txt"):
+                         with open(f"{source}/{folder}/{file}", "r") as f:
+                            self.data.append(f.read().strip().lower())
+            else:
+                continue
+
         self.return_idxs = return_idxs
 
     def __len__(self): return len(self.data)
