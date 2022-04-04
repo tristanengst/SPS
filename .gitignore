@@ -16,6 +16,5 @@ wandb
 glide_model_cache*
 *.txt
 minDALLE/
-dalle/
 models_sps/
 *.gz
