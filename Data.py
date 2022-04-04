@@ -364,14 +364,14 @@ class TextDataset(Dataset):
         source = f"{data_path}/{source}"
 
         self.data = []
-        for folder in os.listdir(source):
+        for folder in sorted(os.listdir(source)):
             if folder.endswith(".txt"):
                 file = folder
                 if file.endswith(".txt"):
                      with open(f"{source}/{file}", "r") as f:
                         self.data.append(f.read().strip().lower())
             elif os.path.isdir(folder):
-                for file in os.listdir(f"{source}/{folder}"):
+                for file in sorted(os.listdir(f"{source}/{folder}")):
                     if file.endswith(".txt"):
                          with open(f"{source}/{folder}/{file}", "r") as f:
                             self.data.append(f.read().strip().lower())
