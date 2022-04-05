@@ -60,12 +60,12 @@ if __name__ == "__main__":
     args.name = f"gen_{args.data}" if args.name is None else args.name
     save_path = f"{args.data_path}/{args.name}/{args.split}"
     for idx,caption in tqdm(data, desc="Building data folder structure", dynamic_ncols=True):
-        path = f"{args.data_path}/{save_path}/{idx}"
+        path = f"{save_path}/{idx}"
         if not os.path.exists(path):
             os.makedirs(path)
         with open(f"{path}/caption.txt", "w+") as f:
             f.write(caption)
 
     # Generate images
-    for e in tqdm(range(args.epochs + args.start_epoch), desc="Generating epochs", dynamic_ncols=True):
+    for e in tqdm(range(args.start_epoch, args.epochs + args.start_epoch), desc="Generating epochs", dynamic_ncols=True):
         generate_one_epoch(model, loader, e, save_path)
