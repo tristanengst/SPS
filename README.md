@@ -7,25 +7,26 @@ conda activate py39SPS
 conda install pytorch torchvision cudatoolkit=11.3 -c pytorch
 conda install -c conda-forge wandb sentence-transformers tokenizers pyflakes tqdm pytorch-lightning einops omegaconf matplotlib
 pip install git+https://github.com/openai/CLIP.git
+pip install 'git+https://github.com/katsura-jp/pytorch-cosine-annealing-with-warmup'
 ```
 
 ## Data Setup
 **MS-COCO**
-Download the MS-COCO validation split [images](http://images.cocodataset.org/zips/val2014.zip) and [annotations](http://images.cocodataset.org/annotations/annotations_trainval2014.zip). Unzip both files, and properly format the data:
+Download the MS-COCO validation split [images](http://images.cocodataset.org/zips/val2014.zip) and [annotations](http://images.cocodataset.org/annotations/annotations_trainval2014.zip). You need to force reload the pages to get the files to actually download. Unzip them, and properly format the data:
 ```
 python FormatCOCO.py --annotations PATH_TO_ANNOTATIONS --images PATH_TO_IMAGES
 ```
+Now, generate text-conditioned images. The following script generates one image for each caption in the dataset. You need to run it many times to generate the augmentations. You should vary the `--start_epoch` input as generated images are named imageN_augSTART_EPOCH; not doing this will cause the script to overwrite what it generates.
+```
+python GenerateAugmentations --data coco_captions_images --start_epoch 0
+```
+Each run will take about 1.5 days on an A100 GPU. Be warned. You can modify `generate_images.sh` to do it on a SLURM cluster. Or, you can download the data we used [here](). We didn't use enough data in our experiments, and you should make more. 
 
 **miniImagenet**
+Download the data []() here, unzip it, and place it in the `data` folder.
 
 ## Method
-As originally formulated, this project involved interesting text augmentation and a corresponding loss function. This relied on a text-to-image model that could produce accurate results for a caption, which published text-to-image models are not yet capable of.
 
-Instead, we take a task from text-and-image data somewhat similar to CLIP, but making full use of text-to-image generation. In CLIP, the basic idea is to jointly encode text and images via contrastive learning; the positive for an image is an encoding of its caption. Here, we take an alternative view: given a caption and two images generated from it, we want to embed the images close together. This allows text-to-image generation to function as a kind of augmentation, standing in contrast to comparatively weak augmentations like random horizontal flips. Within the field of representation learning, this is cool.
-
-However, this removes the linguistic grounding, producing instead a clever way to generate images for contrastive learning. Therefore, we ask how captions might be used as supervision for training. We ought not to use this as an input, as they may not be available at test time. In regular SimCLR-style contrastive learning, images may be pushed apart from images that are in fact their positives as information labeling them as such isn't available—we have nothing more than self-supervision. Here, we have captions. Therefore, instead of pushing negatives apart, we regress them to their captions' distance.
-
-We let the non-grounded baseline be a ablation of this study.
 
 ### Training
 We will train on the MS-COCO dataset.

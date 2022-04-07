@@ -32,11 +32,11 @@ if __name__ == "__main__":
         help="Path to datasets directory")
     P.add_argument("--split", choices=["train", "val", "test"], default="train",
         help="split of data to get augmentations for")
-    P.add_argument("--gpu", required=True, type=int,
+    P.add_argument("--gpu", type=int, default=0,
         help="ID of GPU to use")
     P.add_argument("--start_epoch", type=int, default=0,
         help="Index of epoch to start generating at")
-    P.add_argument("--epochs", type=int, default=10,
+    P.add_argument("--epochs", type=int, default=1,
         help="Number of epochs to generate data for")
     P.add_argument("--bs", type=int, default=1,
         help="ID of GPU to use")

@@ -1,9 +1,5 @@
 import os
 
-def collate_fn(list_of_inputs):
-    return [x[0] for x in list_of_inputs] + [x[1] for x in list_of_inputs]
-
-
 """Code for building datasets.
 
 See data/SetupDataset.py for downloading their underlying data.
@@ -39,9 +35,10 @@ from utils.Utils import *
 #
 # but only `cifar10` would be recorded here.
 ################################################################################
-datasets = ["cifar10", "miniImagenet", "coco"]
+datasets = ["cifar10", "miniImagenet", "coco", "gen_coc"]
 no_val_split_datasets = ["cifar10"]
 small_image_datasets = ["cifar10"]
+generated_datasets = ["gen_coco"]
 data2split2n_class = {
     "cifar10": {"train": 10, "val": 10, "test": 10},
     "miniImagenet": {"train": 64, "val": 16, "test": 20}
@@ -62,7 +59,7 @@ def seed_kwargs(seed=0):
 # Functionality for loading datasets
 ################################################################################
 
-def get_data_splits(data_str, eval_str, res=None, data_path=f"{project_dir}/data"):
+def get_data_splits(data_str, return_captions, data_path=f"{project_dir}/data"):
     """Returns data for training and evaluation. All Datasets returned are
     ImageFolders, meaning that another kind of dataset likely needs to be built
     on top of them.
@@ -71,49 +68,33 @@ def get_data_splits(data_str, eval_str, res=None, data_path=f"{project_dir}/data
     data_str    -- string specifying the dataset to load. It must exactly exist
                     in the data directory, ie. data/data_str exists.
     eval_str    -- how to get validation/testing data
-    res         -- resolutions in which to return data
-                    - if None, returned data will correspond to [data_str]
-                    - if a single int, returned data will correspond to
-                        [data_str] at resolution [res]
-                    - if a list of ints, returned data will be a list of
-                        datasets with the ith value in [res] the [ith]
-                        resolution of the returned data. Evaluation data will
-                        have two resolutions, sequentially, the min and max of
-                        [res]
     data_path   -- path to dataset; data can be found at data_path/data_str
     """
-    def path_to_imagefolder(paths):
-        """Returns ImageFolder(s) given [paths], a list of data paths for a
-        list of ImageFolders, or a string for a single ImageFolder.
-        """
-        if isinstance(paths, list):
-            return [PreAugmentedImageFolder(p) for p in paths]
-        else:
-            return PreAugmentedImageFolder(paths)
-
-    ############################################################################
-    # CIFAR-10 has its own weird logic
-    ############################################################################
-    if data_str == "cifar10":
-        return (CIFAR10(root=data_path, train=True, download=True),
-                CIFAR10(root=data_path, train=eval_str in ["val", "cv"],
-                    download=True))
-
-    data_path = f"{data_path}/{data_str}"
-    eval_str = "train" if eval_str == "cv" else eval_str
-
-    if res is None:
-        data_paths_tr = f"{data_path}/train"
-        data_paths_eval = f"{data_path}/{eval_str}"
-    elif isinstance(res, int) or (isinstance(res, list) and len(res) == 1):
-        res = res if isinstance(res, int) else res[0]
-        data_paths_tr = f"{data_path}_{res}x{res}/train"
-        data_paths_eval = f"{data_path}_{res}x{res}/{eval_str}"
+    if data_str == "miniImagenet" and not return_captions:
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_val = ImageFolder(f"{data_path}/{data_str}/val")
+    elif data_str == "miniImagenet" and return_captions:
+        raise ValueError("Can not return captions with miniImagenet")
+    elif data_str == "coco"  and not return_captions:
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_val = ImageFolder(f"{data_path}/miniImagenet/val")
+        tqdm.write("NOTE: Validation data is miniImagenet val split")
+    elif data_str == "coco"  and return_captions:
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_val = ImageFolder(f"{data_path}/miniImagenet/val")
+        tqdm.write("NOTE: Validation data is miniImagenet val split")
+    elif data_str == "gen_coco" and not return_captions:
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_val = ImageFolder(f"{data_path}/miniImagenet/val")
+        tqdm.write("NOTE: Validation data is miniImagenet val split")
+    elif data_str == "gen_coco"  and return_captions:
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_val = ImageFolder(f"{data_path}/miniImagenet/val")
+        tqdm.write("NOTE: Validation data is miniImagenet val split")
     else:
-        data_paths_tr = [f"{data_path}_{r}x{r}/train" for r in res]
-        data_paths_eval = [f"{data_path}_{r}x{r}/{eval_str}" for r in res]
+        raise ValueError(f"Unknown dataset '{data_str}")
 
-    return path_to_imagefolder(data_paths_tr), path_to_imagefolder(data_paths_eval)
+    return data_tr, data_val
 
 ################################################################################
 # Augmentations
@@ -125,11 +106,9 @@ def get_real_augs(crop_size=32):
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor()
     ])
-
     augs_te = transforms.Compose([
         transforms.RandomResizedCrop(crop_size),
         transforms.ToTensor()])
-
     return augs_tr, augs_tr, augs_te
 
 def get_contrastive_augs(crop_size=32, gaussian_blur=False, color_s=0):
@@ -147,19 +126,13 @@ def get_contrastive_augs(crop_size=32, gaussian_blur=False, color_s=0):
         transforms.RandomApply([color_jitter], p=0.8),
         transforms.RandomGrayscale(p=0.2)])
 
-    augs_tr_list = [transforms.RandomResizedCrop(crop_size)]
-
-    if color_s > 0:
-        augs_tr_list.append(color_distortion)
-    if gaussian_blur:
-        augs_tr_list.append(transforms.GaussianBlur(23, sigma=(.1, 2)))
-
-    augs_tr_list += [
+    augs_tr = transforms.Compose([
+        transforms.RandomResizedCrop(crop_size),
+        color_distortion,
+        transforms.GaussianBlur(23, sigma=(.1, 2)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor()
-    ]
-
-    augs_tr = transforms.Compose(augs_tr_list)
+    ])
 
     augs_te = transforms.Compose([
         transforms.RandomResizedCrop(crop_size),

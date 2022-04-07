@@ -1,173 +1,164 @@
-"""
-
-GPU USAGE:
-- I assume two GPUs
-- DALLE should be DataParallel on both GPUs
-- CLIP should be on GPU 1
-- the SPS model should be on GPU 0
-"""
 import argparse
-from functools import partial
-import lpips
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from sentence_transformers import util as sentence_transformer_utils
+from tqdm import tqdm
 import wandb
 
 import torch
-from torch.cuda.amp import GradScaler, autocast
+from torch.optim import Adam, SGD
 import torch.nn as nn
-from torch.optim import AdamW, Adam
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast
+
+from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
 from Data import *
-from Models import *
-from Utils import *
+from Evaluation import classification_eval
+from utils.UtilsContrastive import *
+from utils.Utils import *
+from utils.UtilsNN import *
 
-################################################################################
-#
-################################################################################
+def one_epoch_sps(model, optimizer, loader, temp=.5):
+    """Returns a (model, optimizer, loss) tuple after training [model] on
+    [loader] for one epoch.
 
+    The returned loss is averaged over batches.
 
-from GLIDE import glide_generate
-
-class SPSLoss(nn.Module):
-    """Returns SPS Loss."""
-    def __init__(self, temp=.5):
-        super(SPSLoss, self).__init__()
-        self.cosine_similarity = nn.CosineSimilarity(dim=1, eps=1e-08)
-        self.temp = temp
-        self.reduction = "mean"
-
-    def forward(self, x1, x2, y):
-        bs, d = x1.shape
-        dists = self.cosine_similarity(x1.repeat(bs, 1), x2.repeat(bs, 1))
-        dists = torch.exp(dists / self.temp).view(bs, bs)
-        numerator = 1 - (torch.matmul(dists, torch.eye(bs, device=device)) - y)
-        denomenator = torch.sum(dists)
-        loss = torch.mean(-1 * torch.log(torch.divide(numerator, denomenator)))
-        return loss
-
-def get_loss_fn(lpips_frac=0):
-    """Returns a convex combination of SPS and LPIPs loss with the LPIPS loss
-    weighted to be [lpips_frac] of the total.
+    model           -- a model of the form projection_head(feature_extractor())
+    optimizer       -- the optimizer for [model]
+    loader          -- a DataLoader over the data to train on
+    temp            -- contrastive loss temperature
     """
-    if lpips_frac > 0:
-        raise NotImplementedError()
-    else:
-        return SPSLoss()
-
-text_sim_model = None
-def get_text_distances(sentences):
-    """Returns a Tensor of all pairwise cosine distances among [sentences]."""
-    global text_sim_model
-    if text_sim_model is None:
-        text_sim_model = SentenceTransformer("bert-base-nli-mean-tokens", device=device)
-
-    embeddings = text_sim_model.encode(sentences, convert_to_tensor=True,
-        device=device, normalize_embeddings=True)
-    return sentence_transformer_utils.dot_score(embeddings, embeddings)
-
-def one_epoch(sps_model, optimizer, loader, scheduler, grad_norm=float("inf"),
-    num_prints=10, **kwargs):
-    """Returns a (model, optimizer, loss_tr) tuple after training [model] for
-    one epoch.
-
-    Args:
-    model       -- model being trained
-    optimizer   -- optimizer for [model]
-    loader      -- DataLoader over a TextDataset
-    scheduler   -- learning rate scheduler
-    grad_norm   -- value to clip gradient norms to
-    num_prints  -- number of times to print during the epoch
-    """
-    total_loss = 0
+    model.train()
+    loss_fn = NTXEntLoss(temp)
+    loss_total = 0
     scaler = GradScaler()
 
-    cos = nn.CosineSimilarity(dim=1, eps=1e-6).to("cuda:0")
+    for x1,x2 in tqdm(loader, desc="Batches", total=len(loader), leave=False, dynamic_ncols=True):
 
-    for idx,sentences in tqdm(enumerate(loader), total=len(loader), desc="Batches", leave=False, dynamic_ncols=True):
         with autocast():
-            with torch.no_grad():
-                images = glide_generate(sentences).to("cuda:0")
-                text_distances = get_text_distances(sentences)
-
-            fx = sps_model(images)
-
-            fx1 = fx.unsqueeze(0).expand((fx.shape[0],) + fx.shape).reshape((fx.shape[0] ** 2,) + fx.shape[1:])
-            fx2 = fx.repeat_interleave(fx.shape[0], dim=0)
-            image_distances = cos(fx1, fx2).view(fx.shape[0], fx.shape[0])
-            loss = torch.mean((image_distances - text_distances) ** 2)
+            model.zero_grad(set_to_none=True)
+            loss = loss_fn(model(x1.float().to(device, non_blocking=True)),
+                           model(x2.float().to(device, non_blocking=True))).unsqueeze(0)
 
         scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        # clip_grad_norm_(sps_model.parameters(), grad_norm)
         scaler.step(optimizer)
+        loss_total += loss.item()
         scaler.update()
-        total_loss += loss.item()
 
-        tqdm.write(f"loss {loss.item()}")
+    return model, optimizer, scheduler, loss_total / len(loader)
 
-        if idx % (len(loader) // num_prints) == 0:
-            tqdm.write(f"\tcurr_loss {loss} | lr {scheduler.get_last_lr()[0]}")
+def one_epoch_basic(model, optimizer, loader, scheduler, temp=.5):
+    """Returns a (model, optimizer, loss) tuple after training [model] on
+    [loader] for one epoch.
 
+    The returned loss is averaged over batches.
+
+    model           -- a model of the form projection_head(feature_extractor())
+    optimizer       -- the optimizer for [model]
+    loader          -- a DataLoader over the data to train on
+    temp            -- contrastive loss temperature
+    """
+    model.train()
+    loss_fn = NTXEntLoss(temp)
+    loss_total = 0
+    scaler = GradScaler()
+
+    for x1,x2 in tqdm(loader, desc="Batches", total=len(loader), leave=False, dynamic_ncols=True):
+
+        with autocast():
+            model.zero_grad(set_to_none=True)
+            loss = loss_fn(model(x1.float().to(device, non_blocking=True)),
+                           model(x2.float().to(device, non_blocking=True)))
+
+        scaler.scale(loss.unsqueeze(0)).backward()
+        scaler.step(optimizer)
+        loss_total += loss.item()
+        scaler.update()
         scheduler.step()
 
-    return sps_model, optimizer, total_loss / len(loader)
-
+    return model, optimizer, scheduler, loss_total / len(loader)
 
 if __name__ == "__main__":
-    P = argparse.ArgumentParser(description="SPS training")
-    P.add_argument("--data_dir", type=str, default=f"{project_dir}/data",
-        help="Directory to find data folders int")
-    P.add_argument("--wandb", choices=[0, 1], default=1, type=int,
-        help="Enable WandB")
-    P.add_argument("--data", required=True, type=str,
-        help="prefix of data folder. --data_dir/--data should be a valid path to it")
-    P.add_argument("--transform", choices=["basic"],
-        help="Text transformation")
-    P.add_argument("--save_iter", default=10, type=int,
-        help="Number of iterations between model saves")
+    P = argparse.ArgumentParser(description="SimCLR training")
+    P.add_argument("--wandb", default=1, choices=[0, 1], type=int,
+        help="Whether to use W&B logging or not")
+    P.add_argument("--data_path", default=f"{project_dir}/data", type=str,
+        help="path to data if not in normal place")
+    P.add_argument("--data", choices=["cifar10", "miniImagenet", "gen_coco", "coco"],
+        default="cifar10",
+        help="dataset to load images from")
     P.add_argument("--resume", default=None, type=str,
-        help="checkpoint to resume from")
+        help="file to resume from")
+    P.add_argument("--suffix", default="", type=str,
+        help="suffix")
+
+    # Non-hyperparameter arguments
+    P.add_argument("--num_workers", default=24, type=int,
+        help="Number of workers for data loading")
+    P.add_argument("--eval_iter", default=10, type=int,
+        help="number of epochs between linear evaluations")
+    P.add_argument("--save_iter", default=100, type=int,
+        help="save a model every --save_iter epochs")
+    P.add_argument("--unreal_augs", default=1, type=int, choices=[0, 1],
+        help="whether to use augs that can take an image off the real manifold")
+    P.add_argument("--sps_loss", default=0, type=int, choices=[0, 1],
+        help="whether to use the proposed loss function or not")
+
+    # Hyperparameter arguments
+    P.add_argument("--backbone", default="resnet18", choices=["resnet18", "resnet50"],
+        help="Resnet backbone to use")
+
+    P.add_argument("--color_s", default=1, type=float,
+        help="color distortion strength")
+    P.add_argument("--gaussian_blur", choices=[0, 1], type=int, default=1,
+        help="include Gaussian blur in data augmentation")
+    P.add_argument("--crop_size", type=int, default=128,
+        help="resolution at which to feed images to the network")
+
+    P.add_argument("--bs", default=1000, type=int,
+        help="batch size")
+    P.add_argument("--epochs", default=1000, type=int,
+        help="number of epochs")
+    P.add_argument("--lars", default=1, choices=[0, 1],
+        help="whether or not to use LARS")
+    P.add_argument("--lr", default=1e-3, type=float,
+        help="base learning rate")
+    P.add_argument("--mm", nargs="+", default=(.9, .999), type=float,
+        help="momentum (one arg for SGD, two—beta1 and beta2 for Adam)")
+    P.add_argument("--n_ramp", default=10, type=int,
+        help="Number of linear ramp epochs at start of training")
+    P.add_argument("--proj_dim", default=128, type=int,
+        help="dimension of projection space")
+    P.add_argument("--temp", default=.5, type=float,
+        help="contrastive loss temperature")
+    P.add_argument("--trust", default=.001, type=float,
+        help="LARS trust coefficient")
     P.add_argument("--seed", default=0, type=int,
         help="random seed")
-    P.add_argument("--arch", default="vgg_linear_rescale", choices=["vgg_linear_rescale"],
-        help="random seed")
-    P.add_argument("--suffix", default=None, type=str,
-        help="checkpoint to resume from")
-
-    P.add_argument("--num_workers", default=24, type=int,
-        help="Number of dataloader workers")
-
-    P.add_argument("--bs", type=int, default=1,
-        help="Batch size")
-    P.add_argument("--epochs", type=int, default=1,
-        help="Number of training epochs")
-    P.add_argument("--grad_norm", type=float, default=float("inf"),
-        help="Batch size")
-    P.add_argument("--lr", type=float, default=1e-3,
-        help="Base learning rate")
-
     args = P.parse_args()
 
     ############################################################################
-    # INITIALIZATION STEP. Either instantiate a new run-specific traiining
-    # objects or load old ones.
+    # Check arguments
+    ############################################################################
+    if not args.save_iter % args.eval_iter == 0:
+        tqdm.write("WARNING: training will save a checkpoint without direct evaluation. Ensure --save_iter % --eval_iter is zero to avoid this.")
+    if args.data in no_val_split_datasets and args.eval == "val":
+        raise ValueError("The requested dataset has no validation split. Run with --eval test or cv instead.")
+
+    ############################################################################
+    # Load prior state if it exists, otherwise instantiate a new training run.
     ############################################################################
     if args.resume is not None:
         run_id, resume_data = wandb_load(args.resume)
         cur_seed = set_seed(resume_data["seed"])
-        data_folder_path = args.data_folder_path
+        data_path = args.data_path
 
-        wandb.init(id=run_id, resume="must", project="sps-metric")
+        wandb.init(id=run_id, resume="must", project="sps")
         wandb.save("*.pt")
         model = resume_data["model"].to(device)
         optimizer = resume_data["optimizer"]
         last_epoch = resume_data["last_epoch"]
         args = resume_data["args"]
-        args.data_folder_path = data_folder_path
+        args.data_path = data_path
 
         save_dir = sps_folder(args)
     else:
@@ -175,30 +166,89 @@ if __name__ == "__main__":
         args.run_id = wandb.util.generate_id()
         save_dir = sps_folder(args)
 
-        wandb.init(anonymous="allow", id=args.run_id, project="sps-metric",
+        wandb.init(anonymous="allow", id=args.run_id, project="sps",
             mode="online" if args.wandb else "disabled", config=args,
-            name=f"{args.data}_{args.arch}_{args.run_id}{suffix_str(args)}")
+            name=f"{args.data}-{args.backbone}-sps_loss{args.sps_loss}-{args.run_id}{suffix_str(args)}")
 
+        model = HeadedResNet(args.backbone, args.proj_dim,
+            head_type="projection",
+            small_image=(args.data in small_image_datasets))
+        model = nn.DataParallel(model, device_ids=[0, 1]).to(device)
+        optimizer = Adam(get_param_groups(model, args.lars), lr=args.lr,
+            betas=args.mm, weight_decay=1e-6)
+        optimizer = LARS(optimizer, args.trust) if args.lars else optimizer
         last_epoch = -1
-        sps_model = ScaledVGGFeatures().to("cuda:0")
-        # model = nn.DataParallel(model, device_ids=args.gpus).to(device)
-        optimizer = Adam(sps_model.parameters(), lr=args.lr, weight_decay=1e-8)
 
-    tqdm.write(dict_to_nice_str(vars(args)) + "\n\n")
+    tqdm.write(dict_to_nice_str(vars(args)))
 
-    dataset = HumanAugmentationTextDataset(args.data)
-    loader = DataLoader(dataset, batch_size=args.bs, num_workers=0, shuffle=False, collate_fn=collate_fn)
-    scheduler = CosineAnnealingWarmRestarts(optimizer,
-        (len(loader) * args.epochs // 16), eta_min=1e-6, last_epoch=last_epoch)
+    ############################################################################
+    # Instantiate the scheduler and get the data
+    ############################################################################
+    data_tr, data_eval = get_data_splits(args.data, args.sps_loss,
+        data_path=args.data_path)
 
-    for e in tqdm(range(args.epochs), desc="Epochs",  dynamic_ncols=True):
-        sps_model, optimizer, loss_tr = one_epoch(sps_model, optimizer, loader,
-            scheduler, **vars(args))
+    if args.unreal_augs:
+        augs_tr, augs_fn, augs_te = get_contrastive_augs(color_s=args.color_s,
+            crop_size=args.crop_size, gaussian_blur=args.gaussian_blur)
+    else:
+        augs_tr, augs_fn, augs_te = get_real_augs(crop_size=args.crop_size)
 
-        tqdm.write(f"End of epoch {e} | loss_tr {loss_tr:.5e}")
-        wandb.log({"epoch": e, "loss_tr": loss_tr, "lr": scheduler.get_lr()[0]})
+    if not args.data in generated_datasets:
+        data_ssl = ManyTransformsDataset(data_tr, augs_tr, augs_tr)
+    elif args.data in generated_datasets and not args.sps_loss:
+        data_ssl = PreAugmentedImageFolder(f"{args.data_path}/{args.data}",
+            transform=augs_tr)
+    elif args.sps_loss:
+        #data_ssl = TextCaptionsDataset(data_tr, augs_tr)
+        raise NotImplementedError()
+        
+    loader = DataLoader(data_ssl, shuffle=True, batch_size=args.bs,
+        drop_last=True, num_workers=args.num_workers, pin_memory=True,
+        **seed_kwargs(cur_seed))
+    scheduler = CosineAnnealingWarmupRestarts(optimizer,
+        first_cycle_steps=args.epochs * len(loader), max_lr=args.lr, 
+        min_lr=1e-6, warmup_steps=args.n_ramp * len(loader),
+        last_epoch=last_epoch if last_epoch == -1 else last_epoch * len(loader))
+
+    tqdm.write(f"Dataset length {len(data_tr)}")
+
+    ############################################################################
+    # Begin training!
+    ############################################################################
+    for e in tqdm(range(max(last_epoch + 1, 1), args.epochs + 1), desc="Epochs", dynamic_ncols=True):
+        model, optimizer, scheduler, loss_tr = one_epoch_basic(model,
+            optimizer, loader, scheduler, args.temp)
+
+        ########################################################################
+        # LOG RESULTS OF THE EPOCH. Perform a classification cross validation if
+        # desired, and otherwise print/log results or merely that the epoch
+        # happened
+        ########################################################################
+        if e % args.eval_iter == 0 and not e == 0 and args.eval_iter > 0:
+
+            # Extract the backbone from the model
+            if hasattr(model, "backbone"):
+                backbone = model.backbone
+            elif hasattr(model, "module"):
+                backbone = model.module.backbone
+            else:
+                raise ValueError(f"Got model of unknown type '{type(model)}")
+
+            val_acc_avg, val_acc_std = classification_eval(backbone,
+                data_tr, data_eval, augs_fn, augs_te, data_name=args.data,
+                data_split="val", trials=1, num_workers=args.num_workers)
+
+            wandb.log({"epoch": e, "loss_tr": loss_tr / len(loader),
+                "acc_val": val_acc_avg, "lr": scheduler.get_lr()[0]})
+            tqdm.write(f"End of epoch {e} | lr {scheduler.get_lr()[0]:.5f} | loss_tr {loss_tr / len(loader):.5f} | val acc {val_acc_avg:.5f} ± {val_acc_std:.5f}")
+        else:
+            wandb.log({"epoch": e, "loss_tr": loss_tr / len(loader),
+                "lr": scheduler.get_lr()[0]})
+            tqdm.write(f"End of epoch {e} | lr {scheduler.get_lr()[0]:.5f} | loss_tr {loss_tr / len(loader):.5f}")
 
         if e % args.save_iter == 0 and not e == 0:
             wandb_save({"model": model, "optimizer": optimizer, "args": args,
-                "last_epoch": e}, f"{simclr_folder(args)}/{e}.pt")
+                "last_epoch": e}, f"{sps_folder(args)}/{e}.pt")
             tqdm.write("Saved training state")
+
+        
