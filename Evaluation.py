@@ -15,30 +15,7 @@ from utils.UtilsContrastive import *
 from utils.Utils import *
 from torch.cuda.amp import GradScaler, autocast
 
-def get_label2idxs(data_tr, data_name=None, data_split=None):
-    """Returns a label to indices mapping for [data_tr]."""
-    data_split = "train" if data_split == "cv" else data_split
-
-    if data_name is not None and data_split is not None:
-        save_path = f"{project_dir}/Data/{data_name}/{data_split}_label2idx.json"
-        if os.path.exists(save_path):
-            with open(save_path, "r") as f:
-                return json.load(f)
-
-    label2idxs = defaultdict(lambda: [])
-    for idx,(_,y) in tqdm(enumerate(data_tr), desc="Building label2idxs", total=len(data_tr)):
-        label2idxs[y].append(idx)
-
-    if data_name is not None and data_split is not None:
-        save_dir_path = f"{project_dir}/Data/{data_name}"
-        if not os.path.exists(save_dir_path):
-            os.makedirs(save_dir_path)
-
-        if not os.path.exists(f"{save_dir_path}/{data_split}_label2idx.json"):
-            with open(f"{save_dir_path}/{data_split}_label2idx.json", "w+") as f:
-                json.dump(label2idxs, f)
-
-    return label2idxs
+from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
 def accuracy(model, loader):
     """Returns the accuracy of [model] on [loader]."""
@@ -51,6 +28,37 @@ def accuracy(model, loader):
             total += len(preds)
 
     return correct / total
+
+def get_y2idxs(data_tr, data_name=None, data_path=f"{project_dir}/data", split=None):
+    """Returns a label to indices mapping for [data_tr]. Together, [data_name]
+    and [data_split] can be used to memoize the mapping.
+    
+    Args:
+    data_tr     -- a dataset returning XY pairs
+    data_name   -- the name of the dataset
+    data_split  -- the split of the dataset
+    """
+    # If the mapping already exists, return it
+    if data_name is not None and data_split is not None:
+        save_path = f"{data_path}/{data_name}/{split}_label2idx.json"
+        if os.path.exists(save_path):
+            with open(save_path, "r") as f:
+                return json.load(f)
+
+    # Build the mapping
+    y2idxs = defaultdict(lambda: [])
+    for idx,(_,y) in tqdm(enumerate(data_tr), desc="Building y2idxs", total=len(data_tr)):
+        y2idxs[y].append(idx)
+
+    # Memoize the mapping if possible
+    if data_name is not None and data_split is not None:
+        if not os.path.exists(f"{save_dir_path}/{split}_label2idx.json"):
+            with open(f"{save_dir_path}/{split}_label2idx.json", "w+") as f:
+                json.dump(y2idxs, f)
+
+    return y2idxs
+
+
 
 def get_eval_data(data_tr, data_te, augs_fn, augs_te, F, precompute_feats=True, num_workers=24, bs=1000):
     """Returns validation training and testing datasets. The testing dataset may
@@ -66,12 +74,12 @@ def get_eval_data(data_tr, data_te, augs_fn, augs_te, F, precompute_feats=True, 
     precompute_feats    -- whether to precompute features.
     """
     if precompute_feats:
-        return (FeatureDataset(XYDataset(data_tr, augs_fn), F, bs=bs, num_workers=num_workers),
+        return (FeatureDataset(XYDataset(data_tr, augs_fn), F, bs=bs,num_workers=num_workers),
                 FeatureDataset(XYDataset(data_te, augs_te), F, bs=bs, num_workers=num_workers))
     else:
         return XYDataset(data_tr, augs_fn), XYDataset(data_te, augs_te)
 
-def get_eval_trial_accuracy(data_tr, data_te, F, out_dim, num_classes, trial=0, epochs=100, bs=64, num_workers=24):
+def get_eval_trial_accuracy(data_tr, data_te, out_dim, num_classes, trial=0, epochs=100, bs=64, num_workers=24, F=None):
     """Returns the accuracy of a linear model trained on features from [F] of
     [data_tr] on [data_te].
 
@@ -83,55 +91,60 @@ def get_eval_trial_accuracy(data_tr, data_te, F, out_dim, num_classes, trial=0, 
     epochs      -- the number of epochs to train for
     bs          -- the batch size to use
     """
-    loader_tr = DataLoader(data_tr, shuffle=True, pin_memory=True,
-        batch_size=bs, drop_last=False,
-        num_workers=num_workers, **seed_kwargs(trial))
-    loader_te = DataLoader(data_te, pin_memory=True, batch_size=1024,
-        drop_last=False, num_workers=num_workers, **seed_kwargs(trial))
+    # Check inputs
+    if (len(data_tr[0][0].shape) > 1 or len(data_te[0][0].shape) > 1) and F is None:
+        raise ValueError("If data is not a single-order tensor, feature extractor F must not be None")
+    
+    # If [F] is None, convert it to an idenity function to pretend to use it
+    F = nn.Identity() if F is None else F
 
+    # Construct training and testing utilities
+    loader_tr = DataLoader(data_tr, shuffle=True, pin_memory=True,
+        batch_size=bs, drop_last=False, num_workers=num_workers,
+        **seed_kwargs(trial))
+    loader_te = DataLoader(data_te, pin_memory=True, batch_size=1024,
+        drop_last=False, num_workers=num_workers)
     model = nn.Linear(out_dim, num_classes).to(device)
     optimizer = Adam(model.parameters(), lr=1e-3, weight_decay=1e-6)
-    scheduler = CosineAnnealingLR(optimizer, epochs)
-    F = nn.Identity().to(device) if F is None else F.to(device)
-    F.eval()
-    loss_fn = nn.CrossEntropyLoss().to(device)
+    scheduler = CosineAnnealingWarmupRestarts(optimizer,
+        first_cycle_steps=epochs * len(loader_tr), max_lr=5e-3, min_lr=1e-4)
+    loss_fn = nn.CrossEntropyLoss(reduction="mean").to(device)
+    scaler = GradScaler()
 
     for e in tqdm(range(epochs), desc="Validation epochs", leave=False):
-        model.train()
 
-        scaler = GradScaler()
         for x,y in loader_tr:
             with autocast():
                 with torch.no_grad():
-                    x = x.to(device, non_blocking=True)
-                    x = x if F is None else F(x)
+                    x = F(x.to(device, non_blocking=True))
 
-                model.zero_grad()
+                model.zero_grad(set_to_none=True)
                 loss = loss_fn(model(x), y.to(device, non_blocking=True))
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-
-        scheduler.step()
+            scheduler.step()
 
     return accuracy(nn.Sequential(F, model), loader_te)
 
+
+from sklearn.model_selection import train_test_split
+
 def classification_eval(feature_extractor, data_tr, data_te, augs_fn, augs_te,
     precompute_feats=True, ex_per_class="all", trials=3, epochs=100, bs=64,
-    data_name=None, data_split=None, num_workers=24):
+    num_workers=24, data_path=None, data_name=None, split=None):
     """Returns evaluation accuracy of feature extractor [feature_extractor].
 
     Args:
     feature_extractor   -- feature extractor
-    data_name           -- the the name of the data
-    data_tr             -- training data for linear model
-    data_te             -- testing data
+    data                -- data to test generalization to
     augs_fn             -- augmentations for training (of linear model) data
-    augs_te             -- augmentations for testing data
     precompute_feats    -- precompute features. This is massively faster because
                             the CNN need be run only once, but reduces the
                             number of augmentations used in total.
-    ex_per_class        -- examples per class
+    ex_per_class        -- 'all' or a number. Gives the number of examples per
+                            class that should be used in training. (This would
+                            be useful for few-shot learning.)
     trials              -- number of trials. If [data_te] is 'cv', number of
                             cross-validation folds
     """
@@ -148,76 +161,39 @@ def classification_eval(feature_extractor, data_tr, data_te, augs_fn, augs_te,
         end = (1 + split_index) * (len(idxs) // trials)
         return idxs[start:end] if include else idxs[:start] + idxs[end:]
 
-    label2idxs = get_label2idxs(data_tr, data_name=data_name, data_split=data_split)
+    y2idxs = get_y2idxs(data_tr, data_path=data_path, data_name=data_name, split=split)
     out_dim = feature_extractor.out_dim
-    num_classes = data_tr.num_classes
+    num_classes = len(y2idxs)
     accuracies = []
 
     for t in tqdm(range(trials), desc="Validation trials"):
 
         if data_te == "cv":
-            label2idxs_te = {y: get_split_idxs(label2idxs[y], t, include=True)
-                             for y in label2idxs}
-            label2idxs_tr = {y: get_split_idxs(label2idxs[y], t, include=False)
-                             for y in label2idxs}
-
+            y2idxs_tr = {y: get_split_idxs(y2idxs[y], t, include=False) for y in y2idxs}
+            y2idxs_te = {y: get_split_idxs(y2idxs[y], t, include=True) for y in y2idxs}
+            
             if not ex_per_class == "all":
-                idxs_tr = [random.sample(label2idxs_tr[y], ex_per_class)
-                                    for y in label2idxs_tr]
+                idxs_tr = [random.sample(y2idxs_tr[y], ex_per_class) for y in y2idxs_tr]
             else:
-                idxs_tr = [idx for y in label2idxs_tr for idx in label2idxs_tr[y]]
-            idxs_te = [idx for y in label2idxs_te for idx in label2idxs_te[y]]
+                idxs_tr = [idx for y in y2idxs_tr for idx in y2idxs_tr[y]]
+
+            idxs_te = [idx for y in y2idxs_te for idx in y2idxs_te[y]]
             trial_data_tr = Subset(data_tr, indices=flatten(idxs_tr))
             trial_data_te = Subset(data_tr, indices=flatten(idxs_te))
         else:
             if not ex_per_class == "all":
-                idxs_tr = [random.sample(label2idxs[y], ex_per_class)
-                           for y in label2idxs]
+                idxs_tr = [random.sample(y2idxs[y], ex_per_class) for y in y2idxs]
             else:
-                idxs_tr = [idx for y in label2idxs for idx in label2idxs[y]]
+                idxs_tr = [idx for y in y2idxs for idx in y2idxs[y]]
             trial_data_tr = Subset(data_tr, indices=flatten(idxs_tr))
             trial_data_te = data_te
 
         trial_data_tr, trial_data_te = get_eval_data(trial_data_tr, trial_data_te,
             augs_fn, augs_te, F=feature_extractor,
             precompute_feats=precompute_feats, num_workers=num_workers, bs=8 * bs)
-
-        accuracies.append(get_eval_trial_accuracy(trial_data_tr, trial_data_te,
-            (None if precompute_feats else feature_extractor),
-            out_dim, num_classes,
-            epochs=epochs, bs=bs, trial=t, num_workers=num_workers))
+        acc = get_eval_trial_accuracy(trial_data_tr, trial_data_te, out_dim,
+            num_classes, epochs=epochs, bs=bs, trial=t, num_workers=num_workers,
+            F=None if precompute_feats else feature_extractor)
+        accuracies.append(acc)
 
     return np.mean(accuracies), np.std(accuracies) * 1.96 / np.sqrt(trials)
-
-
-# if __name__ == "__main__":
-#     P = argparse.ArgumentParser(description="IMLE training")
-#     P.add_argument("--eval", default="val", choices=["val", "test"],
-#         help="The data to evaluate linear finetunings on")
-#     P.add_argument("--model", default=None, type=str,
-#         help="file to resume from")
-#     P.add_argument("--precompute_feats", default=0, choices=[0, 1],
-#         help="whether to precompute features")
-#     P.add_argument("--suffix", default="", type=str,
-#         help="suffix")
-#     P.add_argument("--bs", default=256, type=int,
-#         help="batch size")
-#     P.add_argument("--epochs", default=200, type=int,
-#         help="number of epochs")
-#     P.add_argument("--seed", default=0, type=int,
-#         help="random seed")
-#     args = P.parse_args()
-
-#     model, _, _, old_args, _ = load_(args.model)
-#     model = model.to(device)
-
-#     data_tr, data_eval = get_data_splits(args.data, args.eval)
-#     augs_tr, augs_fn, augs_te = get_contrastive_args(args.data, args.color_s)
-
-#     val_acc_avg, val_acc_std = classification_eval(model.backbone, data_tr,
-#         data_val, augs_fn, augs_te,
-#         data_name=old_args.data,
-#         ex_per_class="all",
-#         precompute_feats=args.precompute_feats,
-#         epochs=args.epochs, bs=args.bs)
-#     tqdm.write(f"val acc {val_acc_avg:.5f} ± {val_acc_std:.5f}")

@@ -75,22 +75,23 @@ def get_data_splits(data_str, return_captions, data_path=f"{project_dir}/data"):
         data_val = ImageFolder(f"{data_path}/{data_str}/val")
     elif data_str == "miniImagenet" and return_captions:
         raise ValueError("Can not return captions with miniImagenet")
-    elif data_str == "coco"  and not return_captions:
+    elif "gen_coco" in data_str and not return_captions:
         data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
         data_val = ImageFolder(f"{data_path}/miniImagenet/val")
         tqdm.write("NOTE: Validation data is miniImagenet val split")
-    elif data_str == "coco"  and return_captions:
+    elif "gen_coco" in data_str  and return_captions:
         data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
         data_val = ImageFolder(f"{data_path}/miniImagenet/val")
         tqdm.write("NOTE: Validation data is miniImagenet val split")
-    elif data_str == "gen_coco" and not return_captions:
+    elif "coco" in data_str  and not return_captions:
         data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
         data_val = ImageFolder(f"{data_path}/miniImagenet/val")
         tqdm.write("NOTE: Validation data is miniImagenet val split")
-    elif data_str == "gen_coco"  and return_captions:
+    elif "coco" in data_str  and return_captions:
         data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
         data_val = ImageFolder(f"{data_path}/miniImagenet/val")
         tqdm.write("NOTE: Validation data is miniImagenet val split")
+    
     else:
         raise ValueError(f"Unknown dataset '{data_str}")
 

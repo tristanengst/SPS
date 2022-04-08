@@ -5,7 +5,7 @@ import wandb
 import torch
 from torch.optim import Adam, SGD
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from torch.cuda.amp import GradScaler, autocast
 
 from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
@@ -15,36 +15,6 @@ from Evaluation import classification_eval
 from utils.UtilsContrastive import *
 from utils.Utils import *
 from utils.UtilsNN import *
-
-def one_epoch_sps(model, optimizer, loader, temp=.5):
-    """Returns a (model, optimizer, loss) tuple after training [model] on
-    [loader] for one epoch.
-
-    The returned loss is averaged over batches.
-
-    model           -- a model of the form projection_head(feature_extractor())
-    optimizer       -- the optimizer for [model]
-    loader          -- a DataLoader over the data to train on
-    temp            -- contrastive loss temperature
-    """
-    model.train()
-    loss_fn = NTXEntLoss(temp)
-    loss_total = 0
-    scaler = GradScaler()
-
-    for x1,x2 in tqdm(loader, desc="Batches", total=len(loader), leave=False, dynamic_ncols=True):
-
-        with autocast():
-            model.zero_grad(set_to_none=True)
-            loss = loss_fn(model(x1.float().to(device, non_blocking=True)),
-                           model(x2.float().to(device, non_blocking=True))).unsqueeze(0)
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        loss_total += loss.item()
-        scaler.update()
-
-    return model, optimizer, scheduler, loss_total / len(loader)
 
 def one_epoch_basic(model, optimizer, loader, scheduler, temp=.5):
     """Returns a (model, optimizer, loss) tuple after training [model] on
@@ -83,7 +53,7 @@ if __name__ == "__main__":
         help="Whether to use W&B logging or not")
     P.add_argument("--data_path", default=f"{project_dir}/data", type=str,
         help="path to data if not in normal place")
-    P.add_argument("--data", choices=["cifar10", "miniImagenet", "gen_coco", "coco"],
+    P.add_argument("--data", required=True,
         default="cifar10",
         help="dataset to load images from")
     P.add_argument("--resume", default=None, type=str,
@@ -226,7 +196,7 @@ if __name__ == "__main__":
         ########################################################################
         if e % args.eval_iter == 0 and not e == 0 and args.eval_iter > 0:
 
-            # Extract the backbone from the model
+            # Extract the backbone from the model. This is gross :(
             if hasattr(model, "backbone"):
                 backbone = model.backbone
             elif hasattr(model, "module"):
@@ -234,9 +204,8 @@ if __name__ == "__main__":
             else:
                 raise ValueError(f"Got model of unknown type '{type(model)}")
 
-            val_acc_avg, val_acc_std = classification_eval(backbone,
-                data_tr, data_eval, augs_fn, augs_te, data_name=args.data,
-                data_split="val", trials=1, num_workers=args.num_workers)
+            val_acc_avg, val_acc_std = classification_eval(backbone, data_eval,
+                "cv", augs_fn, augs_te, trials=3)
 
             wandb.log({"epoch": e, "loss_tr": loss_tr / len(loader),
                 "acc_val": val_acc_avg, "lr": scheduler.get_lr()[0]})
