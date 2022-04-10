@@ -31,15 +31,15 @@ def accuracy(model, loader):
 
 def get_y2idxs(data_tr, data_name=None, data_path=f"{project_dir}/data", split=None):
     """Returns a label to indices mapping for [data_tr]. Together, [data_name]
-    and [data_split] can be used to memoize the mapping.
+    and [split] can be used to memoize the mapping.
     
     Args:
     data_tr     -- a dataset returning XY pairs
     data_name   -- the name of the dataset
-    data_split  -- the split of the dataset
+    split  -- the split of the dataset
     """
     # If the mapping already exists, return it
-    if data_name is not None and data_split is not None:
+    if data_name is not None and split is not None:
         save_path = f"{data_path}/{data_name}/{split}_label2idx.json"
         if os.path.exists(save_path):
             with open(save_path, "r") as f:
@@ -51,9 +51,9 @@ def get_y2idxs(data_tr, data_name=None, data_path=f"{project_dir}/data", split=N
         y2idxs[y].append(idx)
 
     # Memoize the mapping if possible
-    if data_name is not None and data_split is not None:
-        if not os.path.exists(f"{save_dir_path}/{split}_label2idx.json"):
-            with open(f"{save_dir_path}/{split}_label2idx.json", "w+") as f:
+    if data_name is not None and split is not None:
+        if not os.path.exists(f"{data_path}/{data_name}/{split}_label2idx.json"):
+            with open(f"{data_path}/{data_name}/{split}_label2idx.json", "w+") as f:
                 json.dump(y2idxs, f)
 
     return y2idxs

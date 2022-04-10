@@ -70,10 +70,10 @@ def get_data_splits(data_str, return_captions, data_path=f"{project_dir}/data"):
     eval_str    -- how to get validation/testing data
     data_path   -- path to dataset; data can be found at data_path/data_str
     """
-    if data_str == "miniImagenet" and not return_captions:
+    if "miniImagenet" in data_str and not return_captions:
         data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
-        data_val = ImageFolder(f"{data_path}/{data_str}/val")
-    elif data_str == "miniImagenet" and return_captions:
+        data_val = ImageFolder(f"{data_path}/miniImagenet/val")
+    elif "miniImagenet" in data_str and return_captions:
         raise ValueError("Can not return captions with miniImagenet")
     elif "gen_coco" in data_str and not return_captions:
         data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")

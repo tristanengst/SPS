@@ -16,6 +16,79 @@ from utils.UtilsContrastive import *
 from utils.Utils import *
 from utils.UtilsNN import *
 
+class SPSLoss(nn.Module):
+    """NT-XEnt loss, modified from PyTorch Lightning."""
+
+    def __init__(self, temp=.5):
+        """Args:
+        temp    -- contrastive loss temperature
+        """
+        super(SPSLoss, self).__init__()
+        self.temp = temp
+
+    def forward(self, fx1, fx2, C):
+        """
+        fx1 -- 
+        fx2 --
+        C   --
+        """
+        out = torch.cat([fx1, fx2], dim=0)
+        n_samples = len(out)
+        cov = torch.mm(out, out.t().contiguous())
+        sim = torch.exp(cov / self.temp)
+        mask = ~torch.eye(n_samples, device=sim.device).bool()
+
+        neg = sim.masked_select(mask).view(n_samples, -1)
+        print("      ", neg.shape)
+
+        # Each element of [neg] corresponds to a negative pair. Each element of
+        # C represents the semantic similarity between two images, on a scale of
+        # 1 / e to e. Therefore 1 / C gives the semantic dissimilarity of the
+        # pairs. We can reweight neg by (1 / C), forcing the network to pay more
+        # attention to the semantically dissimilar pairs.
+
+        C = torch.exp(C / self.temp).view(n_samples, -1)
+        C_inverse = 1 / C
+        C_inverse = C_inverse / C_inverse.sum()
+
+        neg_times_text_sim = torch.multiply(neg, C_inverse)
+        neg_times_text_sim = neg_times_text_sim * (neg.sum() / neg_times_text_sim.sum())
+        
+        pos = torch.exp(torch.sum(fx1 * fx2, dim=-1) / self.temp)
+        pos = torch.cat([pos, pos], dim=0)
+        return -torch.log(pos / neg_times_text_sim).mean()
+
+def one_epoch_sps(model, optimizer, loader, scheduler, temp=.5):
+    """Returns a (model, optimizer, loss) tuple after training [model] on
+    [loader] for one epoch.
+
+    The returned loss is averaged over batches.
+
+    model           -- a model of the form projection_head(feature_extractor())
+    optimizer       -- the optimizer for [model]
+    loader          -- a DataLoader over the data to train on
+    temp            -- contrastive loss temperature
+    """
+    model.train()
+    loss_fn = NTXEntLoss(temp)
+    loss_total = 0
+    scaler = GradScaler()
+
+    for (x1,c1),(x2,c2) in tqdm(loader, desc="Batches", total=len(loader), leave=False, dynamic_ncols=True):
+
+        with autocast():
+            model.zero_grad(set_to_none=True)
+            loss = loss_fn(model(x1.float().to(device, non_blocking=True)),
+                           model(x2.float().to(device, non_blocking=True)))
+
+        scaler.scale(loss.unsqueeze(0)).backward()
+        scaler.step(optimizer)
+        loss_total += loss.item()
+        scaler.update()
+        scheduler.step()
+
+    return model, optimizer, scheduler, loss_total / len(loader)
+
 def one_epoch_basic(model, optimizer, loader, scheduler, temp=.5):
     """Returns a (model, optimizer, loss) tuple after training [model] on
     [loader] for one epoch.
@@ -205,7 +278,8 @@ if __name__ == "__main__":
                 raise ValueError(f"Got model of unknown type '{type(model)}")
 
             val_acc_avg, val_acc_std = classification_eval(backbone, data_eval,
-                "cv", augs_fn, augs_te, trials=3)
+                "cv", augs_fn, augs_te, trials=3, data_name=args.data,
+                data_path=args.data_path, split="val")
 
             wandb.log({"epoch": e, "loss_tr": loss_tr / len(loader),
                 "acc_val": val_acc_avg, "lr": scheduler.get_lr()[0]})
