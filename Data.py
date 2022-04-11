@@ -227,10 +227,12 @@ class PreAugmentedImageFolder(Dataset):
                             string are considered augmentations of each other.
     transform           -- transform to apply
     target_transform    -- target transform
+    num_augs            -- the maximum number of augmentations that can be
+                            returned for each image        
     verbose             -- whether to print info about constructed dataset
     """
     def __init__(self, source, transform=None, target_transform=None,
-        verbose=True):
+        verbose=True, num_augs=float("inf")):
 
         def remove_aug_info(s):
             """Returns string [s] without information indicating which
@@ -254,6 +256,8 @@ class PreAugmentedImageFolder(Dataset):
                 if os.path.splitext(image)[1].lower() in [".jpg", ".jpeg", ".png"]:
                     image2idxs[remove_aug_info(f"{c}/{image}")].append(counter)
                     counter += 1
+        
+        image2idxs = {img: [idxs[:min(len(idxs), num_augs)]] for img,idxs in image2idxs.items()}
 
         super(PreAugmentedImageFolder, self).__init__()
         self.data_idx2aug_idxs = [v for v in image2idxs.values() if len(v) > 0]
