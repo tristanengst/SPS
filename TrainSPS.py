@@ -9,12 +9,39 @@ from torch.utils.data import DataLoader, random_split
 from torch.cuda.amp import GradScaler, autocast
 
 from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
+from sentence_transformers import util as sentence_transformer_utils
 
 from Data import *
 from Evaluation import classification_eval
 from utils.UtilsContrastive import *
 from utils.Utils import *
 from utils.UtilsNN import *
+
+class NTXEntLoss(nn.Module):
+    """NT-XEnt loss, modified from PyTorch Lightning."""
+
+    def __init__(self, temp=.5):
+        """Args:
+        temp    -- contrastive loss temperature
+        """
+        super(NTXEntLoss, self).__init__()
+        self.temp = temp
+
+    def forward(self, fx1, fx2):
+        """Returns the loss from pre-normalized projections [fx1] and [fx2]."""
+        out = torch.cat([fx1, fx2], dim=0)
+        n_samples = len(out)
+        cov = torch.mm(out, out.t().contiguous())
+        sim = torch.exp(cov / self.temp)
+        mask = ~torch.eye(n_samples, device=sim.device).bool()
+        neg = sim.masked_select(mask).view(n_samples, -1).sum(dim=-1)
+        pos = torch.exp(torch.sum(fx1 * fx2, dim=-1) / self.temp)
+        pos = torch.cat([pos, pos], dim=0)
+
+        print("      SIM SHAPE", sim.shape)
+        print("      NEG SHAPE", neg.shape)
+
+        return -torch.log(pos / neg).mean()
 
 class SPSLoss(nn.Module):
     """NT-XEnt loss, modified from PyTorch Lightning."""
@@ -38,21 +65,27 @@ class SPSLoss(nn.Module):
         sim = torch.exp(cov / self.temp)
         mask = ~torch.eye(n_samples, device=sim.device).bool()
 
-        neg = sim.masked_select(mask).view(n_samples, -1)
-        print("      ", neg.shape)
-
+        ########################################################################
+        # Differences from normal NT-Xent start here
+        #
         # Each element of [neg] corresponds to a negative pair. Each element of
         # C represents the semantic similarity between two images, on a scale of
         # 1 / e to e. Therefore 1 / C gives the semantic dissimilarity of the
         # pairs. We can reweight neg by (1 / C), forcing the network to pay more
         # attention to the semantically dissimilar pairs.
+        ########################################################################
+        neg = sim.masked_select(mask).view(n_samples, -1)
 
-        C = torch.exp(C / self.temp).view(n_samples, -1)
+        C = torch.exp(C / self.temp)
         C_inverse = 1 / C
         C_inverse = C_inverse / C_inverse.sum()
 
+        C_inverse = torch.tile(C, (2,2))
+        C_inverse = C_inverse.masked_select(mask).view(n_samples, -1)
+
         neg_times_text_sim = torch.multiply(neg, C_inverse)
         neg_times_text_sim = neg_times_text_sim * (neg.sum() / neg_times_text_sim.sum())
+        neg_times_text_sim = neg_times_text_sim.sum(dim=-1)
         
         pos = torch.exp(torch.sum(fx1 * fx2, dim=-1) / self.temp)
         pos = torch.cat([pos, pos], dim=0)
@@ -70,16 +103,20 @@ def one_epoch_sps(model, optimizer, loader, scheduler, temp=.5):
     temp            -- contrastive loss temperature
     """
     model.train()
-    loss_fn = NTXEntLoss(temp)
+    loss_fn = SPSLoss(temp)
     loss_total = 0
     scaler = GradScaler()
 
-    for (x1,c1),(x2,c2) in tqdm(loader, desc="Batches", total=len(loader), leave=False, dynamic_ncols=True):
+    for (x1,x2),c in tqdm(loader, desc="Batches", total=len(loader), leave=False, dynamic_ncols=True):
+
+        c = c.to(device, non_blocking=True)
+        C = sentence_transformer_utils.cos_sim(c, c)
 
         with autocast():
             model.zero_grad(set_to_none=True)
             loss = loss_fn(model(x1.float().to(device, non_blocking=True)),
-                           model(x2.float().to(device, non_blocking=True)))
+                           model(x2.float().to(device, non_blocking=True)),
+                           C)
 
         scaler.scale(loss.unsqueeze(0)).backward()
         scaler.step(optimizer)
@@ -236,15 +273,15 @@ if __name__ == "__main__":
     else:
         augs_tr, augs_fn, augs_te = get_real_augs(crop_size=args.crop_size)
 
-    if not args.data in generated_datasets:
+    if args.sps_loss:
+        data_ssl = CaptionAndGeneratedImagesDataset(args.data,
+            data_path=args.data_path,
+            image_transform=augs_tr,
+            return_embeddings=True,
+            num_samples=2)
+    else:
         data_ssl = ManyTransformsDataset(data_tr, augs_tr, augs_tr)
-    elif args.data in generated_datasets and not args.sps_loss:
-        data_ssl = PreAugmentedImageFolder(f"{args.data_path}/{args.data}",
-            transform=augs_tr)
-    elif args.sps_loss:
-        #data_ssl = TextCaptionsDataset(data_tr, augs_tr)
-        raise NotImplementedError()
-        
+
     loader = DataLoader(data_ssl, shuffle=True, batch_size=args.bs,
         drop_last=True, num_workers=args.num_workers, pin_memory=True,
         **seed_kwargs(cur_seed))
@@ -255,11 +292,13 @@ if __name__ == "__main__":
 
     tqdm.write(f"Dataset length {len(data_tr)}")
 
+    one_epoch = one_epoch_sps if args.sps_loss else one_epoch_basic
+
     ############################################################################
     # Begin training!
     ############################################################################
     for e in tqdm(range(max(last_epoch + 1, 1), args.epochs + 1), desc="Epochs", dynamic_ncols=True):
-        model, optimizer, scheduler, loss_tr = one_epoch_basic(model,
+        model, optimizer, scheduler, loss_tr = one_epoch(model,
             optimizer, loader, scheduler, args.temp)
 
         ########################################################################

@@ -20,6 +20,7 @@ from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset, random_
 from torchvision.datasets import ImageFolder, CIFAR10
 from torchvision import transforms
 from torchvision.transforms.functional import hflip
+from torchvision.datasets.folder import default_loader
 
 from utils.Utils import *
 
@@ -35,10 +36,12 @@ from utils.Utils import *
 #
 # but only `cifar10` would be recorded here.
 ################################################################################
-datasets = ["cifar10", "miniImagenet", "coco", "gen_coc"]
+def dataset_has_no_captions(data_str):
+    """Returns if a dataset specified by [data_str] has no captions."""
+    return "miniImagenet" in data_str
+
 no_val_split_datasets = ["cifar10"]
 small_image_datasets = ["cifar10"]
-generated_datasets = ["gen_coco"]
 data2split2n_class = {
     "cifar10": {"train": 10, "val": 10, "test": 10},
     "miniImagenet": {"train": 64, "val": 16, "test": 20}
@@ -270,50 +273,87 @@ class PreAugmentedImageFolder(Dataset):
     def __getitem__(self, idx):
         return self.data[random.choice(self.data_idx2aug_idxs[idx])]
 
+def is_image_file(f):
+    f = f.lower()
+    return f.endswith(".png") or f.endswith(".jpg") or f.endswith(".jpeg")
+
 
 class CaptionAndGeneratedImagesDataset(Dataset):
     """A dataset returning a (caption, [images]) tuple.
 
     Args:
-    source      -- a dataset under [data_path] organized as follows:
+    source            -- a dataset under [data_path] organized as follows:
 
-                    source
-                    |------- folder1
-                    |       |------- caption.txt
-                    |       |------- generated_image_1.jpg
-                    |       |------- ...
-                    |       |------- generated_image_N.jpg
-                    |------- ...
-    num_samples -- number of images to return along with a caption
-    data_path   -- path to datasets
+                            source
+                            |------- folder1
+                            |       |------- caption.txt (optional)
+                            |       |------- caption_embedding.pt (optional)
+                            |       |------- generated_image_1.jpg
+                            |       |------- ...
+                            |       |------- generated_image_N.jpg
+                            |------- ...
+    num_samples         -- number of images to return along with a caption
+    data_path           -- path to datasets
+    return_embeddings   -- whether to return embeddings of captions
     """
 
-    def __init__(self, source, num_samples=1, data_path=f"{project_dir}/data"):
+    def __init__(self, source, split="train", num_samples=1, data_path=f"{project_dir}/data", return_embeddings=False, image_transform=transforms.ToTensor()):
         super(CaptionAndGeneratedImagesDataset, self).__init__()
-        source = f"{data_path}/{source}"
 
-        self.data = []
-        for folder in os.listdir():
-            text = None
-            image_files = []
-            for file in os.listdir(f"{data_path}/{source}/{folder}"):
-                if file.endswith(".txt"):
-                     with open(f"{source}/{folder}/{file}", "r") as f:
-                        text = f.read().strip().lower()
-                else:
-                    image_files.append(f"{source}/{folder}/{file}")
-
-            self.data.append((text, image_files))
-
+        self.return_embeddings = return_embeddings
         self.num_samples = num_samples
+        self.image_transform = image_transform
+        self.data = []
+        for folder in os.listdir(f"{data_path}/{source}/{split}"):
+            
+            folder = f"{data_path}/{source}/{split}/{folder}"
+            if os.path.isfile(folder):
+                tqdm.write(f"Skipping file {folder}")
+            
+            caption = None
+            images = []
+
+            for file in os.listdir(folder):
+                if is_image_file(file):
+                    images.append(f"{folder}/{file}")
+                elif file.endswith(".txt") and not self.return_embeddings:
+                    with open(f"{folder}/{file}", "r") as f:
+                        caption = f.read().strip().lower()
+                elif file.endswith("embedding.pt") and self.return_embeddings:
+                    caption = torch.load(f"{folder}/{file}")
+                elif file.endswith(".txt") and self.return_embeddings:
+                    continue
+                elif file.endswith("embedding.pt") and not self.return_embeddings:
+                    continue
+                else:
+                    raise ValueError(f"Got unknown file {file}")
+
+            if len(images) == 0:
+                raise ValueError(f"Found not images under {folder}")
+            if caption is None:
+                raise ValueError(f"Found no caption under {folder}")
+            self.data.append((caption, images))
+
+        self.loader = default_loader
 
     def __len__(self): return len(self.data)
 
     def __getitem__(self, idx):
         caption, image_files = self.data[idx]
         image_files = random.choices(image_files, k=self.num_samples)
-        images = [self.transform(self.loader(f)) for f in image_files]
-        return caption, images
+        images = [self.image_transform(self.loader(f)) for f in image_files]
+        return images, caption
+
+def print_batch(b, indent=""):
+    s = ""
+    if isinstance(b, (list, tuple)):
+        inner = [print_batch(b_, indent=indent + "    ") for b_ in b]
+        s += f"{indent}[\n" + "\n".join(inner) + f"\n{indent}]"
+    elif isinstance(b, str):
+        s += f"{indent}string: {b}"
+    elif isinstance(b, torch.Tensor):
+        s += f"{indent}tensor of size {b.shape}"
+    return s
 
 class TextDataset(Dataset):
     """A dataset returning strings and optionally indices of strings.
