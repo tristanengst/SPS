@@ -182,6 +182,8 @@ if __name__ == "__main__":
         help="whether to use augs that can take an image off the real manifold")
     P.add_argument("--sps_loss", default=0, type=int, choices=[0, 1],
         help="whether to use the proposed loss function or not")
+    P.add_argument("--num_augs", default=19, type=int,
+        help="whether to use the proposed loss function or not")
 
     # Hyperparameter arguments
     P.add_argument("--backbone", default="resnet18", choices=["resnet18", "resnet50"],
@@ -248,7 +250,7 @@ if __name__ == "__main__":
 
         wandb.init(anonymous="allow", id=args.run_id, project="sps",
             mode="online" if args.wandb else "disabled", config=args,
-            name=f"{args.data}-{args.backbone}-sps_loss{args.sps_loss}-{args.run_id}{suffix_str(args)}")
+            name=f"{args.data}-{args.backbone}-num_augs{args.num_augs}sps_loss{args.sps_loss}-unreal_augs{args.unreal_augs}{args.run_id}{suffix_str(args)}")
 
         model = HeadedResNet(args.backbone, args.proj_dim,
             head_type="projection",
@@ -265,7 +267,7 @@ if __name__ == "__main__":
     # Instantiate the scheduler and get the data
     ############################################################################
     data_tr, data_eval = get_data_splits(args.data, args.sps_loss,
-        data_path=args.data_path)
+        data_path=args.data_path, num_augs=args.num_augs)
 
     if args.unreal_augs:
         augs_tr, augs_fn, augs_te = get_contrastive_augs(color_s=args.color_s,

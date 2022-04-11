@@ -62,7 +62,8 @@ def seed_kwargs(seed=0):
 # Functionality for loading datasets
 ################################################################################
 
-def get_data_splits(data_str, return_captions, data_path=f"{project_dir}/data"):
+def get_data_splits(data_str, return_captions, data_path=f"{project_dir}/data",
+    num_augs=float("inf")):
     """Returns data for training and evaluation. All Datasets returned are
     ImageFolders, meaning that another kind of dataset likely needs to be built
     on top of them.
@@ -74,24 +75,24 @@ def get_data_splits(data_str, return_captions, data_path=f"{project_dir}/data"):
     data_path   -- path to dataset; data can be found at data_path/data_str
     """
     if "miniImagenet" in data_str and not return_captions:
-        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train", num_augs=num_augs)
         data_val = ImageFolder(f"{data_path}/miniImagenet/val")
     elif "miniImagenet" in data_str and return_captions:
         raise ValueError("Can not return captions with miniImagenet")
     elif "gen_coco" in data_str and not return_captions:
-        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train", num_augs=num_augs)
         data_val = ImageFolder(f"{data_path}/miniImagenet/val")
         tqdm.write("NOTE: Validation data is miniImagenet val split")
     elif "gen_coco" in data_str  and return_captions:
-        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train", num_augs=num_augs)
         data_val = ImageFolder(f"{data_path}/miniImagenet/val")
         tqdm.write("NOTE: Validation data is miniImagenet val split")
     elif "coco" in data_str  and not return_captions:
-        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train", num_augs=num_augs)
         data_val = ImageFolder(f"{data_path}/miniImagenet/val")
         tqdm.write("NOTE: Validation data is miniImagenet val split")
     elif "coco" in data_str  and return_captions:
-        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train")
+        data_tr = PreAugmentedImageFolder(f"{data_path}/{data_str}/train", num_augs=num_augs)
         data_val = ImageFolder(f"{data_path}/miniImagenet/val")
         tqdm.write("NOTE: Validation data is miniImagenet val split")
     
