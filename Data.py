@@ -258,7 +258,7 @@ class PreAugmentedImageFolder(Dataset):
                     image2idxs[remove_aug_info(f"{c}/{image}")].append(counter)
                     counter += 1
         
-        image2idxs = {img: [idxs[:min(len(idxs), num_augs)]] for img,idxs in image2idxs.items()}
+        image2idxs = {img: idxs[:min(len(idxs), num_augs)] for img,idxs in image2idxs.items()}
 
         super(PreAugmentedImageFolder, self).__init__()
         self.data_idx2aug_idxs = [v for v in image2idxs.values() if len(v) > 0]
