@@ -37,10 +37,6 @@ class NTXEntLoss(nn.Module):
         neg = sim.masked_select(mask).view(n_samples, -1).sum(dim=-1)
         pos = torch.exp(torch.sum(fx1 * fx2, dim=-1) / self.temp)
         pos = torch.cat([pos, pos], dim=0)
-
-        print("      SIM SHAPE", sim.shape)
-        print("      NEG SHAPE", neg.shape)
-
         return -torch.log(pos / neg).mean()
 
 class SPSLoss(nn.Module):
