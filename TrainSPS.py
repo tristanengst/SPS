@@ -80,7 +80,9 @@ class SPSLoss(nn.Module):
         C_inverse = C_inverse.masked_select(mask).view(n_samples, -1)
 
         neg_times_text_sim = torch.multiply(neg, C_inverse)
-        neg_times_text_sim = neg_times_text_sim * (neg.sum() / neg_times_text_sim.sum())
+
+        R = (neg.sum() / neg_times_text_sim.sum()).detach()
+        neg_times_text_sim = neg_times_text_sim * R
         neg_times_text_sim = neg_times_text_sim.sum(dim=-1)
         
         pos = torch.exp(torch.sum(fx1 * fx2, dim=-1) / self.temp)
